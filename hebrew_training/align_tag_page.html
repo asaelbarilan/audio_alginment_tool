@@ -1,0 +1,618 @@
+<!doctype html><meta charset="utf-8"><title>Hebrew alignment tagging</title>
+<style>
+ *{box-sizing:border-box}
+ body{font:14px system-ui,sans-serif;margin:0;padding:14px 18px;background:#14161a;color:#e8e8ea}
+ .top{display:flex;align-items:baseline;gap:14px;margin-bottom:6px;flex-wrap:wrap}
+ h1{font-size:15px;margin:0;font-weight:600}
+ #bar{color:#8a8f98;font-size:13px}
+ #done{color:#4ec98a}
+ .lab{color:#6f757f;font-size:11px;text-transform:uppercase;letter-spacing:.6px;margin:12px 0 4px}
+ .legend{float:right;text-transform:none;letter-spacing:0;font-size:12px}
+ .key{display:inline-block;margin-left:12px}
+ .sw{display:inline-block;width:11px;height:3px;vertical-align:middle;margin-right:4px}
+ #gate{position:fixed;inset:0;background:#14161a;display:none;align-items:center;
+       justify-content:center;z-index:50}
+ #gate.on{display:flex}
+ #gate .card{background:#1c1f25;border-radius:10px;padding:26px 28px;max-width:420px}
+ #gate h2{font-size:16px;margin:0 0 10px}
+ #gate p{color:#8a8f98;line-height:1.5;margin:0 0 16px}
+ #gate input{width:100%;font:14px system-ui,sans-serif;padding:9px 11px;border-radius:6px;
+             border:1px solid #333842;background:#14161a;color:#e8e8ea}
+ #gate button{margin-top:12px;width:100%;font:600 14px system-ui,sans-serif;padding:9px;
+              border:0;border-radius:6px;background:#3d6fd6;color:#fff;cursor:pointer}
+ #whoerr{color:#e06c6c;font-size:12px;min-height:16px;margin-top:8px}
+ #me{color:#6f757f;font-size:12px;margin-left:auto}
+ #ov{display:block;width:100%;height:90px;background:#1c1f25;border-radius:6px;cursor:pointer}
+ #zm{display:block;width:100%;height:220px;background:#1c1f25;border-radius:6px;cursor:grab}
+ #zm.grabbing{cursor:grabbing}
+ #zm.onmark{cursor:ew-resize}
+ #scroll{height:14px;background:#1c1f25;border-radius:0 0 6px 6px;position:relative;
+         margin-top:2px;cursor:pointer}
+ #thumb{position:absolute;top:2px;height:10px;background:#3d6fd6;border-radius:5px;
+        min-width:24px;cursor:grab}
+ #thumb:active{cursor:grabbing}
+ .row{display:flex;align-items:center;gap:6px;margin:9px 0;flex-wrap:wrap}
+ button{background:#2a2e37;color:#e8e8ea;border:1px solid #3a3f4a;border-radius:6px;
+        padding:7px 12px;font:14px system-ui;cursor:pointer}
+ button:hover{background:#363c47}
+ button.on{background:#3d6fd6;border-color:#3d6fd6;color:#fff}
+ button.go{background:#2b6b46;border-color:#2b6b46;color:#fff;font-weight:600}
+ select{background:#2a2e37;color:#e8e8ea;border:1px solid #3a3f4a;border-radius:6px;padding:6px}
+ .sep{width:1px;height:26px;background:#333844;margin:0 4px}
+ .tag{color:#6f757f;font-size:12px;margin-right:2px}
+ #clock{color:#c8ccd4;font-variant-numeric:tabular-nums;margin-left:auto;font-size:13px}
+ #words{margin:10px 0;direction:rtl;text-align:right;line-height:2.3;font-size:16px}
+ .w{padding:3px 9px;margin:0 2px;border-radius:5px;background:#252932;cursor:pointer}
+ .w.cur{background:#3d6fd6;color:#fff;font-weight:600}
+ .w.ok{background:#24503a;color:#bfe6cf}
+ #cmp{margin:6px 0;font-variant-numeric:tabular-nums;font-size:13px}
+ .pill{display:inline-block;padding:3px 10px;margin-right:8px;border-radius:5px;background:#252932}
+ #hint{color:#767c86;margin-top:10px;line-height:1.9;font-size:12.5px}
+ kbd{background:#2a2e37;border:1px solid #3a3f4a;border-radius:4px;padding:1px 5px;font-size:11.5px}
+</style>
+
+<div id="gate"><div class="card">
+  <h2>Hebrew alignment tagging</h2>
+  <p>Your name keeps your marks in their own file, so several people can mark the same
+     clips and we can measure how much they agree.</p>
+  <form id="whoform">
+    <input id="whoin" placeholder="name (letters, digits, - or _)" autocomplete="off" spellcheck="false">
+    <button id="whogo" type="submit">Start marking</button>
+  </form>
+  <div id="whoerr"></div>
+</div></div>
+<div class="top"><h1>Hebrew alignment tagging</h1><div id="bar"></div><div id="me"></div></div>
+
+<div class="lab">whole clip &mdash; click or drag to move the playhead
+  <span class="legend">
+    <span class="key"><i class="sw" style="background:#ff5f56"></i>playhead</span>
+    <span class="key"><i class="sw" style="background:#6aa0ff"></i>your marks</span>
+  </span></div>
+<canvas id="ov"></canvas>
+
+<div class="lab" id="zlab">current word
+  <span class="legend">
+    <span class="key"><i class="sw" style="background:#6aa0ff"></i>your marks</span>
+    <span class="key"><i class="sw" style="background:#ff5f56"></i>playhead</span>
+  </span></div>
+<canvas id="zm"></canvas>
+<audio id="au" preload="auto"></audio>
+<div id="scroll"><div id="thumb"></div></div>
+
+<div class="row">
+  <span class="tag">play</span>
+  <button id="tostart" title="Home">&#9198; start</button>
+  <button id="play" title="Space">&#9654; play</button>
+  <button id="stopb" title="Escape">&#9632; stop</button>
+  <div class="sep"></div>
+  <button id="pbefore" title="Q">&#9654; up to mark</button>
+  <button id="pword" title="W">&#9654; whole word</button>
+  <button id="pafter" title="E">&#9654; after mark</button>
+  <button id="loopWord">&#8635; loop word</button>
+  <button id="loopMark">&#8635; loop across mark</button>
+  <select id="rate">
+    <option value="0.25">0.25&times;</option><option value="0.5">0.5&times;</option>
+    <option value="0.75">0.75&times;</option><option value="1" selected>1.0&times;</option>
+    <option value="1.5">1.5&times;</option></select>
+  <span id="clock">0:00.00 / 0:00.00</span>
+</div>
+
+<div id="words"></div>
+<div id="cmp"></div>
+
+<div class="row">
+  <span class="tag">editing</span>
+  <button id="edStart">word START</button><button id="edEnd" class="on">word END</button>
+  <div class="sep"></div>
+  <button id="setb">put mark at playhead</button>
+  <button id="m10">&minus;10ms</button><button id="p10">+10ms</button>
+</div>
+<div class="row">
+  <span class="tag">move</span>
+  <button id="fit">fit word</button><button id="fitall">fit all words</button><button id="prevw">&larr; prev word</button><button id="nextw">next word &rarr;</button>
+  <div class="sep"></div>
+  <button id="prevc">&larr; prev clip</button>
+  <button id="save" class="go">save &amp; next clip</button>
+  <button id="skip">skip clip</button>
+</div>
+
+<div id="hint">
+<kbd>space</kbd> play / pause &nbsp; <kbd>esc</kbd> stop &nbsp; <kbd>q</kbd> hear up to the mark &nbsp;
+<kbd>w</kbd> the word &nbsp; <kbd>e</kbd> hear after the mark &nbsp;
+<kbd>&larr;</kbd><kbd>&rarr;</kbd> change word &nbsp; <kbd>tab</kbd> switch start/end &nbsp;
+<kbd>f</kbd> put mark at playhead &nbsp;
+<kbd>l</kbd> loop across the mark &nbsp; <kbd>shift+l</kbd> loop the word &nbsp; <kbd>,</kbd><kbd>.</kbd> nudge 10ms &nbsp; <kbd>enter</kbd> save &amp; next
+<br><b>In the lower panel:</b> drag a blue line to move it, or drag the red playhead to scrub. Click anywhere else to move the
+playhead, and <b>drag empty space to slide the view</b>. <b>Wheel zooms</b>, shift+wheel scrolls, the bar under the panel scrolls left and right, &ldquo;fit word&rdquo; snaps to the current word and &ldquo;fit all words&rdquo; shows the whole sentence. <b>Every word's marks are drawn</b> &mdash; drag any of them and that word becomes current, or <b>drag the middle of a word to slide the whole tag</b>.
+</div>
+
+<script>
+const PARAMS=new URLSearchParams(location.search);
+const TOK=PARAMS.get('t')||'';
+let WHO=PARAMS.get('who')||localStorage.getItem('tagWho')||'';
+// Hosted, the token gates the whole server and `who` decides which file a save lands in,
+// so both have to ride along on every request -- including the <audio> src, which is a
+// browser-issued GET this code never sees.
+function api(path){
+  const q=new URLSearchParams();
+  if(TOK)q.set('t',TOK);
+  if(WHO)q.set('who',WHO);
+  const s=q.toString();
+  return s?path+'?'+s:path;
+}
+let clips=[],ci=0,wi=0,edge='end',gold=[],touched=new Set();
+let buf=null,lead=0,ctx=null,peaks=null;
+let playing=false,head=0,loopKind=null,rate=1,seg=null;
+const MARGIN=0.35;                    // seconds of context shown either side of the word
+const ov=document.getElementById('ov'),og=ov.getContext('2d');
+const zm=document.getElementById('zm'),zg=zm.getContext('2d');
+const $=id=>document.getElementById(id);
+const f3=t=>t.toFixed(3);
+const mmss=t=>{t=Math.max(0,t);return Math.floor(t/60)+':'+(t%60).toFixed(2).padStart(5,'0');};
+
+const NAME=/^[A-Za-z0-9_-]{1,32}$/;
+
+async function boot(){
+  const meta=await (await fetch(api('/api/meta'))).json();
+  if(meta.multi && !NAME.test(WHO)) return gate();
+  if(meta.multi) $('me').textContent='marking as '+WHO;
+  return load();
+}
+function gate(){
+  const g=$('gate'); g.classList.add('on'); $('whoin').focus();
+  const go=()=>{
+    const v=$('whoin').value.trim();
+    if(!NAME.test(v)){ $('whoerr').textContent=
+      'Letters, digits, - and _ only, up to 32 characters.'; return; }
+    WHO=v; localStorage.setItem('tagWho',v);
+    g.classList.remove('on'); $('me').textContent='marking as '+WHO;
+    load();
+  };
+  // A real form, so Enter submits the way it does in every other text box, rather than
+  // riding on a keydown handler.
+  $('whoform').onsubmit=e=>{ e.preventDefault(); go(); };
+}
+async function load(){
+  clips=await (await fetch(api('/api/clips'))).json();
+  ci=clips.findIndex(c=>!c.saved); if(ci<0)ci=0;
+  await loadClip(); tick();
+}
+async function loadClip(){
+  stop();
+  au.src=api('/api/audio/'+ci);
+  const c=clips[ci];
+  gold=(c.saved||c.a).map(w=>({word:w.word,start:w.start,end:w.end}));
+  touched=new Set(c.saved?gold.map((_,i)=>i):[]);
+  wi=0; edge='end'; head=0;
+  const r=await fetch(api('/api/audio/'+ci)); lead=parseFloat(r.headers.get('X-Lead')||'0');
+  const ab=await r.arrayBuffer();
+  ctx=ctx||new (window.AudioContext||window.webkitAudioContext)();
+  buf=await ctx.decodeAudioData(ab);
+  peaks=null; view=null; draw(); render();
+}
+const total=()=>buf?buf.duration-lead:0;
+// The served audio starts `lead` seconds BEFORE the row, so time -lead is the first sample
+// that exists. Clamping marks at 0 made the leading context visible but unreachable, which
+// is wrong twice over: the row's own start came from the same aligner being judged, so the
+// true word start can genuinely lie before it. Everything drawn is now reachable.
+const tmin=()=>-lead;
+const mark=()=>edge==='end'?gold[wi].end:gold[wi].start;
+
+// ---- transport -----------------------------------------------------------
+// Playback goes through an <audio> element rather than an AudioBufferSourceNode. A buffer
+// source's playbackRate resamples, so half speed drops the pitch an octave and the voice
+// stops sounding like speech -- exactly what you do not want when judging a boundary by ear.
+// preservesPitch makes the browser time-stretch instead, so 0.25x is still the same voice.
+// The decoded buffer is kept, but only for drawing the waveform.
+const au=$('au');
+au.preservesPitch=true; au.mozPreservesPitch=true; au.webkitPreservesPitch=true;
+// `head` is the playhead, and it is OUR state, not the element's. Reading currentTime while
+// paused meant every drag had to seek the element, and those seeks are async and coalesced,
+// so the marker lagged or stuck. The element is seeked once, when playback actually starts.
+function now(){ return playing ? Math.max(tmin(),Math.min(au.currentTime-lead,total())) : head; }
+function label(){ $('play').innerHTML = playing?'&#10074;&#10074; pause':'&#9654; play'; }
+function stop(){ if(stopAt){clearInterval(stopAt);stopAt=null;}
+  if(playing) head=Math.max(tmin(),Math.min(au.currentTime-lead,total()));
+  au.pause(); playing=false; label(); }
+let stopAt=null;
+function start(from,to){
+  if(!buf)return;
+  if(stopAt){clearInterval(stopAt);stopAt=null;}
+  seg=(to!=null)?[from,to]:null;
+  head=Math.max(tmin(),Math.min(from,total()));
+  if(to!=null && to-head<=.01){draw();return;}
+  au.playbackRate=rate;
+  // Setting currentTime on an element that has not buffered enough is silently ignored, so
+  // playback would begin from wherever it already was rather than from the mark. Wait for
+  // it to be seekable, then seek, then play.
+  const go=()=>{ au.currentTime=head+lead; au.play().catch(()=>{}); };
+  if(au.readyState>=1) go(); else au.addEventListener('loadedmetadata',go,{once:true});
+  playing=true; label();
+  // The element has no "play until t" so the end is watched. 10 ms is well inside a frame.
+  stopAt=setInterval(()=>{
+    const t=now();
+    if(to!=null && t>=to-0.005){
+      if(loopKind){ const sp=loopSpan(); start(sp[0],sp[1]); return; }
+      stop(); head=to; draw(); return;
+    }
+    if(au.ended||t>=total()-0.005){
+      if(loopKind){ const sp=loopSpan(); start(sp[0],sp[1]); return; }
+      stop(); head=total(); draw();
+    }
+  },10);
+}
+function loopSpan(){
+  return loopKind==='word' ? [gold[wi].start,gold[wi].end]
+       : [Math.max(tmin(),mark()-.35), Math.min(total(),mark()+.35)];
+}
+function setLoop(kind){
+  loopKind=(loopKind===kind)?null:kind;
+  $('loopWord').classList.toggle('on',loopKind==='word');
+  $('loopMark').classList.toggle('on',loopKind==='mark');
+  if(loopKind){ const sp=loopSpan(); start(sp[0],sp[1]); } else stop();
+}
+function toggle(){
+  if(playing){ stop(); draw(); return; }
+  // Playing a region (word, up-to-mark, after-mark) leaves the playhead exactly at that
+  // region's end with seg still set, so the next press asked for a zero-length span and
+  // silently did nothing -- the transport looked frozen. Finishing a region falls back to
+  // free play, and reaching the end of the clip rewinds.
+  if(seg && head>=seg[1]-0.005) seg=null;
+  if(head>=total()-0.005) head=tmin();
+  start(head,seg?seg[1]:null);
+}
+function moveHead(t){
+  const wasPlaying=playing;
+  head=Math.max(tmin(),Math.min(t,total()));
+  if(wasPlaying){ start(head,null); return; }   // playing: restart from the new spot
+  seg=null; draw();                              // paused: just draw, no seek, no lag
+}
+const playWord  =()=>start(gold[wi].start,gold[wi].end);
+const playBefore=()=>start(Math.max(tmin(),mark()-.45),mark());
+const playAfter =()=>start(mark(),Math.min(total(),mark()+.45));
+
+// ---- waveform ------------------------------------------------------------
+function buildPeaks(w){
+  const d=buf.getChannelData(0),n=d.length; peaks=new Float32Array(w*2);
+  for(let x=0;x<w;x++){let lo=1,hi=-1;const s=Math.floor(x*n/w),e=Math.floor((x+1)*n/w);
+    for(let i=s;i<e;i++){const v=d[i];if(v<lo)lo=v;if(v>hi)hi=v;}
+    peaks[x*2]=lo;peaks[x*2+1]=hi;}
+}
+function drawOverview(){
+  const w=ov.clientWidth,h=90; ov.width=w*devicePixelRatio; ov.height=h*devicePixelRatio;
+  og.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0); og.clearRect(0,0,w,h);
+  if(!buf)return;
+  if(!peaks||peaks.length!==w*2) buildPeaks(w);
+  const dur=buf.duration, X=t=>(t+lead)/dur*w;
+  gold.forEach((wd,i)=>{ og.fillStyle=(i===wi)?'rgba(61,111,214,.30)':'rgba(255,255,255,.03)';
+    og.fillRect(X(wd.start),0,Math.max(1,X(wd.end)-X(wd.start)),h); });
+  og.fillStyle='#2f3540';
+  for(let x=0;x<w;x++){const lo=peaks[x*2],hi=peaks[x*2+1];
+    og.fillRect(x,h/2+lo*h/2.2,1,Math.max(1,(hi-lo)*h/2.2));}
+  gold.forEach((wd,i)=>{ og.fillStyle=(i===wi)?'#6aa0ff':'#48505e'; og.fillRect(X(wd.end),0,1,h); });
+  og.fillStyle='#ff5f56'; og.fillRect(X(now()),0,2,h);
+}
+// the zoom window always contains the WHOLE current word, so start and end are both reachable
+// The zoom window is explicit state, not a function of the word, so it can be dragged and
+// zoomed. It is refitted to the word whenever the word or clip changes, and nudged along by
+// ensureVisible when a mark is dragged past its edge.
+let view=null,dragging=false;
+function fitWord(){
+  view=[Math.max(tmin(),gold[wi].start-MARGIN), Math.min(total(),gold[wi].end+MARGIN)];
+  if(view[1]-view[0]<0.12) view[1]=view[0]+0.12;
+}
+function zwin(){ if(!view) fitWord(); return view; }
+function panBy(dt){
+  const [lo,hi]=view, span=hi-lo;
+  let a=lo+dt, b=hi+dt;
+  if(a<tmin()){a=tmin();b=a+span;}
+  if(b>total()){b=total();a=b-span;}
+  view=[a,b]; draw();
+}
+function zoomAt(t,f){
+  const [lo,hi]=view; let span=(hi-lo)*f;
+  span=Math.max(0.06,Math.min(span,total()-tmin()));
+  const frac=(t-lo)/(hi-lo);
+  let a=t-frac*span, b=a+span;
+  if(a<tmin()){a=tmin();b=a+span;}
+  if(b>total()){b=total();a=Math.max(tmin(),b-span);}
+  view=[a,b]; draw();
+}
+function ensureVisible(t){
+  // Never while a mark is being dragged. Panning there moves the window that the pointer
+  // position is converted through, so the mark chases its own new coordinates and sticks.
+  // During a drag only the edge timer pans, by a fixed step that does not depend on the
+  // pointer, which cannot feed back.
+  if(dragging) return;
+  const [lo,hi]=view, pad=(hi-lo)*0.12;
+  if(t<lo+pad) panBy(t-(lo+pad)); else if(t>hi-pad) panBy(t-(hi-pad));
+}
+function drawZoom(){
+  const w=zm.clientWidth,h=220; zm.width=w*devicePixelRatio; zm.height=h*devicePixelRatio;
+  zg.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0); zg.clearRect(0,0,w,h);
+  if(!buf)return;
+  const [lo,hi]=zwin(), X=t=>(t-lo)/(hi-lo)*w;
+  // every word's span, so the whole sentence is visible at once; the current one brighter
+  gold.forEach((wd,i)=>{
+    zg.fillStyle=(i===wi)?'rgba(61,111,214,.18)'
+      : touched.has(i)?'rgba(78,201,138,.07)':'rgba(255,255,255,.035)';
+    zg.fillRect(X(wd.start),0,Math.max(1,X(wd.end)-X(wd.start)),h);
+  });
+  const d=buf.getChannelData(0),sr=buf.sampleRate;
+  zg.fillStyle='#39404d';
+  for(let x=0;x<w;x++){
+    const a=lo+(x/w)*(hi-lo), b=lo+((x+1)/w)*(hi-lo);
+    const s=Math.floor((a+lead)*sr), e=Math.floor((b+lead)*sr);
+    let mn=1,mx=-1,any=false;
+    for(let i=Math.max(0,s);i<Math.min(d.length,e);i++){const v=d[i];if(v<mn)mn=v;if(v>mx)mx=v;any=true;}
+    if(any) zg.fillRect(x,h/2+mn*h/2.4,1,Math.max(1,(mx-mn)*h/2.4));
+  }
+  zg.fillStyle='#2b303a';
+  for(let t=Math.ceil(lo*10)/10;t<hi;t+=0.1) zg.fillRect(X(t),h-10,1,10);
+  // every mark is drawn and grabbable; the current word's are bright, the edited one thick
+  gold.forEach((wd,i)=>{
+    const cur=(i===wi);
+    [['start',wd.start],['end',wd.end]].forEach(([which,t])=>{
+      if(X(t)<-4||X(t)>w+4) return;
+      const on=cur&&which===edge;
+      zg.fillStyle=cur?'#6aa0ff':'#4a5872';
+      zg.fillRect(X(t)-(on?2:0),0,on?4:(cur?2:1),h);
+    });
+    // the word itself, over its span, so you can see which mark belongs to which word
+    const mid=(X(wd.start)+X(wd.end))/2;
+    if(mid>-40&&mid<w+40){
+      zg.font=(cur?'bold ':'')+'12px system-ui';
+      zg.fillStyle=cur?'#cfe0ff':'#6b7480';
+      zg.textAlign='center'; zg.fillText(wd.word,mid,15); zg.textAlign='left';
+    }
+  });
+  zg.font='bold 11px system-ui'; zg.fillStyle='#cfe0ff';
+  zg.fillText(edge.toUpperCase(),X(edge==='end'?gold[wi].end:gold[wi].start)
+    +(edge==='start'?6:-34),h-16);
+  const p=now(); if(p>=lo&&p<=hi){ zg.fillStyle='#ff5f56'; zg.fillRect(X(p),0,2,h); }
+  $('zlab').firstChild.textContent='current word "'+gold[wi].word+'"  —  editing the '
+    +edge.toUpperCase()+'   (ticks 100 ms)   ';
+}
+function drawScroll(){
+  const lo=tmin(), hi=total(), span=hi-lo;
+  const [a,b]=zwin(), el=$('scroll'), th=$('thumb');
+  th.style.left=((a-lo)/span*100)+'%';
+  th.style.width=Math.max(2,(b-a)/span*100)+'%';
+}
+function draw(){ drawOverview(); drawZoom(); drawScroll(); }
+function tick(){ if(playing)draw();
+  $('clock').textContent=mmss(now())+' / '+mmss(total()); requestAnimationFrame(tick); }
+
+function render(){
+  const c=clips[ci];
+  $('bar').innerHTML='clip '+(ci+1)+'/'+clips.length+' &nbsp;·&nbsp; word '+(wi+1)+'/'+gold.length
+    +' &nbsp;·&nbsp; <span id="done">'+clips.filter(x=>x.saved).length+' saved</span>';
+  const ws=$('words'); ws.innerHTML='';
+  gold.forEach((wd,i)=>{const s=document.createElement('span');
+    s.className='w'+(i===wi?' cur':(touched.has(i)?' ok':''));
+    s.textContent=wd.word; s.onclick=()=>{wi=i;draw();render();playWord();};
+    ws.appendChild(s);});
+  const me=gold[wi];
+  const prevGap=(wi>0)?me.start-gold[wi-1].end:null;
+  const p=['<span class="pill" style="color:#6aa0ff">'+f3(me.start)+' → '+f3(me.end)+'</span>',
+           '<span class="pill">length '+Math.round((me.end-me.start)*1000)+' ms</span>'];
+  if(prevGap!==null)
+    p.push('<span class="pill">gap before '+Math.round(prevGap*1000)+' ms</span>');
+  $('cmp').innerHTML=p.join('');
+  $('edStart').classList.toggle('on',edge==='start');
+  $('edEnd').classList.toggle('on',edge==='end');
+}
+
+// Marks stay ordered, but only against their immediate neighbours -- clamping a word's end
+// against the NEXT word's end would silently refuse "take aligner B" whenever B places this
+// word later than A placed the following one, which is exactly the disagreement being judged.
+function setMark(t,which){
+  which=which||edge;
+  // Moving one mark never moves another. Words are NOT contiguous -- there is silence
+  // between them, and that gap is precisely what is being marked, so chaining a word's
+  // start to the previous word's end (as the aligners do) destroys the thing we are here
+  // to measure. Each mark is clamped only so the order stays valid: it cannot cross its own
+  // partner, nor the neighbouring word's nearest mark.
+  if(which==='start'){
+    const lo=(wi>0)?gold[wi-1].end:tmin();
+    gold[wi].start=Math.min(Math.max(t,lo),gold[wi].end-.005);
+  }else{
+    const hi=(wi<gold.length-1)?gold[wi+1].start:total();
+    gold[wi].end=Math.max(Math.min(t,hi),gold[wi].start+.005);
+  }
+  touched.add(wi); ensureVisible(which==='start'?gold[wi].start:gold[wi].end);
+  draw(); render();
+  if(loopKind){ const sp=loopSpan(); start(sp[0],sp[1]); }
+}
+const goWord=i=>{ wi=Math.max(0,Math.min(i,gold.length-1)); fitWord(); draw(); render();
+  if(loopKind){const sp=loopSpan(); start(sp[0],sp[1]);} else playWord(); };
+
+// ---- pointer -------------------------------------------------------------
+ov.onmousedown=e=>{
+  const r=ov.getBoundingClientRect();
+  const at=x=>(x-r.left)/r.width*buf.duration-lead;
+  moveHead(at(e.clientX));
+  const mv=ev=>moveHead(at(ev.clientX));          // drag to scrub
+  const up=()=>{removeEventListener('mousemove',mv);removeEventListener('mouseup',up);};
+  addEventListener('mousemove',mv); addEventListener('mouseup',up);
+};
+zm.onmousedown=e=>{
+  const r=zm.getBoundingClientRect();
+  // The window is recomputed on every move, not captured at mousedown. It follows the mark
+  // being dragged, so holding the pointer near an edge keeps scrolling instead of stopping
+  // dead at the edge of the view -- which is what made the start look unreachable.
+  const at=x=>{const [lo,hi]=zwin(); return lo+((x-r.left)/r.width)*(hi-lo);};
+  const px=t=>{const [lo,hi]=zwin(); return (t-lo)/(hi-lo)*r.width+r.left;};
+  // The playhead is grabbable too, and checked first. In this panel a drag already means
+  // "slide the word" inside a span and "pan the view" outside one, so without an explicit
+  // handle the playhead could only be clicked, never dragged -- which reads as broken.
+  if(Math.abs(px(now())-e.clientX)<9){
+    zm.classList.add('grabbing');
+    const mv=ev=>moveHead(at(ev.clientX));
+    const up=()=>{zm.classList.remove('grabbing');
+      removeEventListener('mousemove',mv);removeEventListener('mouseup',up);};
+    addEventListener('mousemove',mv); addEventListener('mouseup',up); return;
+  }
+  // nearest mark across ALL words, so any of them can be grabbed without switching first
+  let best=null;
+  gold.forEach((wd,i)=>{
+    [['start',wd.start],['end',wd.end]].forEach(([which,t])=>{
+      const d=Math.abs(px(t)-e.clientX);
+      if(!best||d<best.d) best={d,i,which};
+    });
+  });
+  // inside a word, away from its marks: drag the whole word, both marks together
+  if(!(best&&best.d<9)){
+    const t=at(e.clientX);
+    const inside=gold.findIndex(wd=>t>wd.start&&t<wd.end);
+    if(inside>=0){
+      wi=inside; render();
+      const w=gold[wi], len=w.end-w.start, grab=t-w.start, downX=e.clientX;
+      let moved=false;
+      const mv=ev=>{
+        // A click that does not travel is a playhead move, not a word slide. Without this
+        // the word spans cover most of the panel and swallow every click.
+        if(!moved){ if(Math.abs(ev.clientX-downX)<=3) return;
+          moved=true; dragging=true; zm.classList.add('grabbing'); }
+        let a=at(ev.clientX)-grab;
+        const lo=(wi>0)?gold[wi-1].end:tmin();
+        const hi=(wi<gold.length-1)?gold[wi+1].start:total();
+        a=Math.max(lo,Math.min(a,hi-len));
+        w.start=a; w.end=a+len; touched.add(wi); draw(); render();
+        if(loopKind){const sp=loopSpan(); start(sp[0],sp[1]);}
+      };
+      const up=()=>{ if(!moved) moveHead(t);
+        dragging=false; zm.classList.remove('grabbing');
+        removeEventListener('mousemove',mv); removeEventListener('mouseup',up);};
+      addEventListener('mousemove',mv); addEventListener('mouseup',up); return;
+    }
+  }
+  if(best&&best.d<9){                          // grabbed a mark: drag it
+    wi=best.i; const which=best.which; edge=which; dragging=true; render();
+    zm.classList.add('grabbing');
+    let last=e.clientX;
+    setMark(at(e.clientX),which);
+    const mv=ev=>{ last=ev.clientX; setMark(at(ev.clientX),which); };
+    // Held past an edge, keep going. This is the only thing that pans during a drag, and it
+    // steps by a fixed fraction of the window rather than from the pointer, so there is no
+    // loop between panning and the pointer-to-time mapping.
+    const timer=setInterval(()=>{
+      const [lo,hi]=zwin(), span=hi-lo;
+      if(last<r.left+6){ panBy(-span*0.05); setMark(mark()-span*0.05,which); }
+      else if(last>r.right-6){ panBy(span*0.05); setMark(mark()+span*0.05,which); }
+    },50);
+    const up=()=>{clearInterval(timer); dragging=false; zm.classList.remove('grabbing');
+      removeEventListener('mousemove',mv);removeEventListener('mouseup',up);};
+    addEventListener('mousemove',mv); addEventListener('mouseup',up); return;
+  }
+  // Not on a mark: drag to pan the view, or click without dragging to move the playhead.
+  const t0x=e.clientX, tAtDown=at(e.clientX); let moved=false;
+  let prev=t0x;
+  const mv2=ev=>{
+    if(Math.abs(ev.clientX-t0x)>3) moved=true;
+    if(!moved){prev=ev.clientX; return;}
+    const [lo,hi]=zwin();
+    panBy(-(ev.clientX-prev)/r.width*(hi-lo));
+    prev=ev.clientX;
+  };
+  zm.classList.add('grabbing');
+  const up=()=>{ zm.classList.remove('grabbing'); if(!moved) moveHead(tAtDown);
+    removeEventListener('mousemove',mv2); removeEventListener('mouseup',up); };
+  addEventListener('mousemove',mv2); addEventListener('mouseup',up);
+};
+zm.addEventListener('mousemove',e=>{
+  if(!buf||zm.classList.contains('grabbing'))return;
+  const r=zm.getBoundingClientRect(),[lo,hi]=zwin();
+  const px=t=>(t-lo)/(hi-lo)*r.width+r.left;
+  let near=Math.abs(px(now())-e.clientX);
+  gold.forEach(wd=>{ near=Math.min(near,Math.abs(px(wd.start)-e.clientX),Math.abs(px(wd.end)-e.clientX)); });
+  zm.classList.toggle('onmark',near<9);
+});
+zm.addEventListener('wheel',e=>{
+  e.preventDefault();
+  const r=zm.getBoundingClientRect(), [lo,hi]=zwin();
+  const t=lo+((e.clientX-r.left)/r.width)*(hi-lo);
+  // Wheel zooms about the pointer -- that is what the work needs, since every question
+  // here is "how close together are these two marks". Shift+wheel scrolls instead.
+  if(e.shiftKey) panBy((e.deltaY!==0?e.deltaY:e.deltaX)/500*(hi-lo));
+  else zoomAt(t, e.deltaY>0?1.25:0.8);
+},{passive:false});
+
+(function(){
+  const el=$('scroll'), th=$('thumb');
+  const spanNow=()=>{const [a,b]=zwin(); return b-a;};
+  function centreOn(clientX){
+    const r=el.getBoundingClientRect(), lo=tmin(), hi=total();
+    const t=lo+((clientX-r.left)/r.width)*(hi-lo), s=spanNow();
+    let a=t-s/2, b=a+s;
+    if(a<lo){a=lo;b=a+s;} if(b>hi){b=hi;a=Math.max(lo,b-s);}
+    view=[a,b]; draw();
+  }
+  th.onmousedown=e=>{
+    e.stopPropagation();
+    const r=el.getBoundingClientRect(), lo=tmin(), hi=total();
+    const grab=e.clientX-th.getBoundingClientRect().left, s=spanNow();
+    const mv=ev=>{
+      let a=lo+((ev.clientX-grab-r.left)/r.width)*(hi-lo), b=a+s;
+      if(a<lo){a=lo;b=a+s;} if(b>hi){b=hi;a=Math.max(lo,b-s);}
+      view=[a,b]; draw();
+    };
+    const up=()=>{removeEventListener('mousemove',mv);removeEventListener('mouseup',up);};
+    addEventListener('mousemove',mv); addEventListener('mouseup',up);
+  };
+  el.onmousedown=e=>{ if(e.target===th)return; centreOn(e.clientX); };
+})();
+$('play').onclick=toggle;
+$('stopb').onclick=()=>{loopKind=null;$('loopWord').classList.remove('on');$('loopMark').classList.remove('on');stop();head=0;seg=null;draw();};
+$('tostart').onclick=()=>moveHead(0);
+$('pbefore').onclick=playBefore; $('pword').onclick=playWord; $('pafter').onclick=playAfter;
+$('loopWord').onclick=()=>setLoop('word');
+$('loopMark').onclick=()=>setLoop('mark');
+$('rate').onchange=e=>{rate=parseFloat(e.target.value); au.playbackRate=rate;};
+$('edStart').onclick=()=>{edge='start';draw();render();};
+$('edEnd').onclick=()=>{edge='end';draw();render();};
+$('setb').onclick=()=>setMark(now());
+$('m10').onclick=()=>setMark(mark()-.01); $('p10').onclick=()=>setMark(mark()+.01);
+$('fit').onclick=()=>{fitWord();draw();};
+$('fitall').onclick=()=>{view=[Math.max(tmin(),gold[0].start-0.2),
+  Math.min(total(),gold[gold.length-1].end+0.2)];draw();};
+$('prevw').onclick=()=>goWord(wi-1); $('nextw').onclick=()=>goWord(wi+1);
+$('prevc').onclick=()=>{if(ci>0){ci--;loadClip();}};
+$('save').onclick=saveNext;
+$('skip').onclick=()=>{if(ci<clips.length-1){ci++;loadClip();}};
+
+async function saveNext(){
+  await fetch(api('/api/gold'),{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({index:ci,words:gold})});
+  clips[ci].saved=gold.map(w=>({...w}));
+  if(ci<clips.length-1){ci++;await loadClip();} else render();
+}
+
+addEventListener('keydown',async e=>{
+  // Never let the transport shortcuts fire while someone is typing: every letter of a
+  // name is also a shortcut here, so the name box would play, seek and re-mark as it
+  // was filled in.
+  if(/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)||e.target.isContentEditable)return;
+  if($('gate').classList.contains('on'))return;
+  if(e.code==='Space'){e.preventDefault();toggle();return;}
+  if(e.key==='Escape'){loopKind=null;$('loopWord').classList.remove('on');$('loopMark').classList.remove('on');stop();head=0;seg=null;draw();return;}
+  if(e.key==='Tab'){e.preventDefault();edge=(edge==='end')?'start':'end';draw();render();return;}
+  if(e.key==='q'){playBefore();return;}
+  if(e.key==='w'){playWord();return;}
+  if(e.key==='e'){playAfter();return;}
+  if(e.key==='l'){setLoop('mark');return;}
+  if(e.key==='L'){setLoop('word');return;}
+  if(e.key==='Home'){moveHead(0);return;}
+  if(e.key==='ArrowLeft'){e.preventDefault();goWord(wi-1);return;}
+  if(e.key==='ArrowRight'){e.preventDefault();goWord(wi+1);return;}
+  if(e.key==='f'){setMark(now());return;}
+  if(e.key===','){setMark(mark()-.01);return;}
+  if(e.key==='.'){setMark(mark()+.01);return;}
+  if(e.key==='<'){setMark(mark()-.002);return;}
+  if(e.key==='>'){setMark(mark()+.002);return;}
+  if(e.key==='Enter'){await saveNext();return;}
+  if(e.key==='s'){if(ci<clips.length-1){ci++;await loadClip();}return;}
+});
+addEventListener('resize',()=>{peaks=null;draw();});
+boot();
+</script>
