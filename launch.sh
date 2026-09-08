@@ -10,5 +10,5 @@ exec python -m hebrew_training.align_tag_server \
   --a data/gold_set/A_hebrew.jsonl \
   --b data/gold_set/B_mms.jsonl \
   --clips-root data/gold_set/clips \
-  --out /tmp/marks --multi --limit 134 \
+  --out /tmp/marks --multi --split --limit 134 \
   --host 0.0.0.0 --port "$XHOST_HTTP_PORT"

@@ -31,6 +31,7 @@ import json
 import re
 import unicodedata
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -40,6 +41,10 @@ LOCK = threading.Lock()
 # Set in main() when the host provides a database. Marks then live there instead of
 # on the container disk, which does not survive a redeploy.
 STORE = None
+CLAIMS = None
+BLOCK = 10  # clips a person holds at once; refilled as they work
+STALE_SECONDS = 24 * 3600  # an unmarked claim this old goes back in the pool, so a person
+#                            who opens the page and wanders off does not strand their share
 PAD = 1.0  # seconds of context served either side, so a boundary at the very edge of a
 #           clip is still judgeable by what comes before and after it
 
@@ -65,6 +70,13 @@ def parse_args() -> argparse.Namespace:
         default=os.environ.get("TAG_TOKEN", ""),
         help="If set, every request must carry ?t=<token>. Not real auth -- it "
         "just stops a stray crawler writing to your gold set.",
+    )
+    parser.add_argument(
+        "--split",
+        action="store_true",
+        help="Hand each annotator their own clips, so nobody marks the same sentence "
+        "twice. Without it everyone walks the same order, which is what measures how "
+        "far two humans sit apart on the same boundary.",
     )
     parser.add_argument(
         "--multi",
@@ -248,6 +260,13 @@ class PostgresStore:
                 "  payload   JSONB NOT NULL,"
                 "  updated_at TIMESTAMPTZ NOT NULL DEFAULT now())"
             )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS claims ("
+                "  clip_key   TEXT PRIMARY KEY,"
+                "  annotator  TEXT NOT NULL,"
+                "  claimed_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
+                "  done       BOOLEAN NOT NULL DEFAULT false)"
+            )
 
     def connect(self):
         return self.psycopg.connect(self.url, autocommit=True)
@@ -259,6 +278,42 @@ class PostgresStore:
             return {}
         return index_rows(row[0], clips)
 
+    def claims(self) -> dict[str, tuple[str, float]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT clip_key, annotator, EXTRACT(EPOCH FROM claimed_at) FROM claims"
+            ).fetchall()
+        return {r[0]: (r[1], float(r[2])) for r in rows}
+
+    def claim(self, who: str, keys: list[str]) -> None:
+        """Take these clips for `who`, skipping any another annotator still holds.
+
+        ON CONFLICT is what makes this safe: two people refilling at the same instant race
+        for the same row, and the loser takes none of it rather than both walking away
+        believing they own the clip. A claim is only stealable once it has gone stale
+        without being marked.
+        """
+        if not keys:
+            return
+        cutoff = time.time() - STALE_SECONDS
+        with self.connect() as conn:
+            for key in keys:
+                conn.execute(
+                    "INSERT INTO claims (clip_key, annotator) VALUES (%s, %s)"
+                    " ON CONFLICT (clip_key) DO UPDATE"
+                    "   SET annotator = EXCLUDED.annotator, claimed_at = now(), done = false"
+                    " WHERE claims.annotator = %s"
+                    "    OR (claims.done = false AND claims.claimed_at < to_timestamp(%s))",
+                    (key, who, who, cutoff),
+                )
+
+    def finish(self, who: str, key: str) -> None:
+        """Mark a claim done, so it is never handed to anyone else."""
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE claims SET done = true WHERE clip_key = %s AND annotator = %s", (key, who)
+            )
+
     def save(self, who: str, clips: list[dict], saved: dict[int, list]) -> None:
         payload = [gold_row(clips[i], saved[i]) for i in sorted(saved)]
         with self.connect() as conn:
@@ -269,6 +324,83 @@ class PostgresStore:
                 "   SET payload = EXCLUDED.payload, updated_at = now()",
                 (who, json.dumps(payload, ensure_ascii=False)),
             )
+
+
+class FileClaims:
+    """The same claim bookkeeping as PostgresStore, in a json file next to the marks.
+
+    Only used when there is no database, i.e. running locally. One process, so the module
+    LOCK is all the mutual exclusion needed.
+    """
+
+    def __init__(self, directory: Path):
+        self.path = directory / "_claims.json"
+
+    def read(self) -> dict:
+        if not self.path.exists():
+            return {}
+        try:
+            return json.loads(self.path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
+
+    def claims(self) -> dict[str, tuple[str, float]]:
+        return {k: (v["annotator"], v["claimed_at"]) for k, v in self.read().items()}
+
+    def claim(self, who: str, keys: list[str]) -> None:
+        if not keys:
+            return
+        cutoff = time.time() - STALE_SECONDS
+        rows = self.read()
+        for key in keys:
+            held = rows.get(key)
+            if held and held["annotator"] != who:
+                if held.get("done") or held["claimed_at"] >= cutoff:
+                    continue
+            rows[key] = {"annotator": who, "claimed_at": time.time(), "done": False}
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+
+    def finish(self, who: str, key: str) -> None:
+        rows = self.read()
+        if key in rows and rows[key]["annotator"] == who:
+            rows[key]["done"] = True
+            self.path.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+
+
+def clip_key(clip: dict) -> str:
+    """Stable id for a clip, independent of its position in the sorted list."""
+    name = str(clip["path"]).replace("\\", "/").rsplit("/", 1)[-1]
+    return f"{name}@{round(float(clip['start']), 3)}"
+
+
+def assign(claimer, who: str, clips: list[dict], marked: set[int]) -> set[int]:
+    """Indices this annotator owns, topping their block up from the unclaimed pool.
+
+    Everyone works the same worst-disagreement-first order, so the pool hands out the most
+    valuable unclaimed clip next regardless of who asks.
+    """
+    held = claimer.claims()
+    cutoff = time.time() - STALE_SECONDS
+    # Work you have already marked is yours whatever the claim table says. Claims can be
+    # absent for marks that arrived another way -- imported from a local session, say --
+    # and dropping them from your list would look like the work had been lost.
+    mine, free = set(marked), []
+    for index, clip in enumerate(clips):
+        key = clip_key(clip)
+        owner = held.get(key)
+        if owner is None:
+            free.append((index, key))
+        elif owner[0] == who:
+            mine.add(index)
+        elif owner[1] < cutoff and index not in marked:
+            free.append((index, key))
+    outstanding = len(mine - marked)
+    if outstanding < BLOCK and free:
+        take = free[: BLOCK - outstanding]
+        claimer.claim(who, [key for _, key in take])
+        mine.update(index for index, _ in take)
+    return mine
 
 
 def gold_row(clip: dict, words: list) -> dict:
@@ -370,15 +502,26 @@ def make_handler(args, clips, saved):
                 meta = {"multi": bool(args.multi), "clips": len(clips)}
                 return self.send(200, json.dumps(meta).encode("utf-8"), "application/json")
             if route == "/api/clips":
+                who = self.who() or "anon"
                 if STORE is not None:
-                    mine = STORE.load(self.who() or "anon", clips)
+                    mine = STORE.load(who, clips)
                 elif args.multi:
                     mine = load_saved(gold_path(args, self.who()), clips)
                 else:
                     mine = saved
+                # With --split each annotator is handed their own clips, so two people never
+                # mark the same sentence. Without it everyone walks the same order, which is
+                # what measures how far two humans sit apart.
+                owned = None
+                if args.split and CLAIMS is not None:
+                    with LOCK:
+                        owned = assign(CLAIMS, who, clips, set(mine))
                 payload = []
                 for index, clip in enumerate(clips):
+                    if owned is not None and index not in owned:
+                        continue
                     entry = dict(clip)
+                    entry["key"] = clip_key(clip)
                     entry["saved"] = mine.get(index)
                     payload.append(entry)
                 return self.send(
@@ -417,19 +560,30 @@ def make_handler(args, clips, saved):
                 return self.send(404, b"not found", "text/plain")
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length).decode("utf-8"))
+            # The page numbers clips by their position in what it was served, which under
+            # --split is a subset. Resolve by clip key so a save cannot land on someone
+            # else's sentence.
+            if body.get("key"):
+                match = [i for i, c in enumerate(clips) if clip_key(c) == body["key"]]
+                if not match:
+                    return self.send(400, b"unknown clip", "text/plain")
+                body["index"] = match[0]
             who = self.who() or "anon"
             # Re-read before writing. Two annotators sharing a store would otherwise each
             # hold a stale copy and the second save would drop the first one's work.
             with LOCK:
+                index = int(body["index"])
                 if STORE is not None:
                     mine = STORE.load(who, clips)
-                    mine[int(body["index"])] = body["words"]
+                    mine[index] = body["words"]
                     STORE.save(who, clips, mine)
                 else:
                     path = gold_path(args, self.who())
                     mine = load_saved(path, clips)
-                    mine[int(body["index"])] = body["words"]
+                    mine[index] = body["words"]
                     write_gold(path, clips, mine)
+                if CLAIMS is not None:
+                    CLAIMS.finish(who, clip_key(clips[index]))
             return self.send(200, b'{"ok":true}', "application/json")
 
     return Handler
@@ -465,12 +619,15 @@ def write_gold(out: Path, clips: list[dict], saved: dict[int, list]) -> None:
 
 
 def main() -> None:
-    global STORE
+    global STORE, CLAIMS
     args = parse_args()
     database = os.environ.get("DATABASE_URL", "")
     if database:
         STORE = PostgresStore(database)
         print("marks -> Postgres (DATABASE_URL)")
+    if args.split:
+        CLAIMS = STORE if STORE is not None else FileClaims(args.out)
+        print(f"split mode: each annotator gets their own clips, {BLOCK} at a time")
     clips = build_clips(args)
     if not clips:
         raise SystemExit(f"no usable clips in {args.a}")

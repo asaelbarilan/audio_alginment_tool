@@ -583,7 +583,7 @@ $('skip').onclick=()=>{if(ci<clips.length-1){ci++;loadClip();}};
 
 async function saveNext(){
   await fetch(api('/api/gold'),{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({index:ci,words:gold})});
+    body:JSON.stringify({index:ci,key:clips[ci].key,words:gold})});
   clips[ci].saved=gold.map(w=>({...w}));
   if(ci<clips.length-1){ci++;await loadClip();} else render();
 }
