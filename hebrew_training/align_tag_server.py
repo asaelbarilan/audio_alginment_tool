@@ -389,6 +389,8 @@ def assign(claimer, who: str, clips: list[dict], marked: set[int]) -> set[int]:
     for index, clip in enumerate(clips):
         key = clip_key(clip)
         owner = held.get(key)
+        if index in marked:
+            continue  # already yours; never offer it as fresh work
         if owner is None:
             free.append((index, key))
         elif owner[0] == who:
