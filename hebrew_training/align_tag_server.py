@@ -421,6 +421,10 @@ def gold_row(clip: dict, words: list) -> dict:
                 # Present only where the annotator corrected the ASR text. Downstream has to
                 # be able to separate a corrected clip from one that was right already.
                 **({"was": w["was"]} if w.get("was") is not None else {}),
+                # A word the transcript never had. A word it had and should not have is
+                # simply absent -- the clip keeps its original `transcript`, so a deletion
+                # stays recoverable without a flag of its own.
+                **({"added": True} if w.get("added") else {}),
             }
             for w in words
         ],
