@@ -418,6 +418,9 @@ def gold_row(clip: dict, words: list) -> dict:
                 "word": w["word"],
                 "start": round(float(w["start"]), 4),
                 "end": round(float(w["end"]), 4),
+                # Present only where the annotator corrected the ASR text. Downstream has to
+                # be able to separate a corrected clip from one that was right already.
+                **({"was": w["was"]} if w.get("was") is not None else {}),
             }
             for w in words
         ],
@@ -593,31 +596,16 @@ def make_handler(args, clips, saved):
 
 def write_gold(out: Path, clips: list[dict], saved: dict[int, list]) -> None:
     """Rewritten in full after each clip: 100 rows is nothing, and a partial append that
-    crashed mid-write would be worse than the rewrite cost."""
+    crashed mid-write would be worse than the rewrite cost.
+
+    Shares gold_row with the Postgres store so the two writers cannot drift -- they had
+    separate copies of the record shape, and only one of them learned about corrected text.
+    """
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w", encoding="utf-8", newline="\n") as handle:
         for index in sorted(saved):
-            clip = clips[index]
-            handle.write(
-                json.dumps(
-                    {
-                        "path": clip["path"],
-                        "start": clip["start"],
-                        "duration": clip["duration"],
-                        "transcript": clip["transcript"],
-                        "words": [
-                            {
-                                "word": w["word"],
-                                "start": round(float(w["start"]), 4),
-                                "end": round(float(w["end"]), 4),
-                            }
-                            for w in saved[index]
-                        ],
-                    },
-                    ensure_ascii=False,
-                )
-                + "\n"
-            )
+            row = gold_row(clips[index], saved[index])
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
 def main() -> None:

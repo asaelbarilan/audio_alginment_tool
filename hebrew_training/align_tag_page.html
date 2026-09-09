@@ -10,6 +10,9 @@
  .legend{float:right;text-transform:none;letter-spacing:0;font-size:12px}
  .key{display:inline-block;margin-left:12px}
  .sw{display:inline-block;width:11px;height:3px;vertical-align:middle;margin-right:4px}
+ .w.fixed{outline:1px solid #d8a13a}
+ .wedit{font:inherit;direction:rtl;background:#14161a;color:#e8e8ea;border:1px solid #d8a13a;
+        border-radius:4px;padding:3px 8px;min-width:80px}
  #gate{position:fixed;inset:0;background:#14161a;display:none;align-items:center;
        justify-content:center;z-index:50}
  #gate.on{display:flex}
@@ -122,7 +125,8 @@
 <kbd>&larr;</kbd><kbd>&rarr;</kbd> change word &nbsp; <kbd>tab</kbd> switch start/end &nbsp;
 <kbd>f</kbd> put mark at playhead &nbsp;
 <kbd>l</kbd> loop across the mark &nbsp; <kbd>shift+l</kbd> loop the word &nbsp; <kbd>,</kbd><kbd>.</kbd> nudge 10ms &nbsp; <kbd>enter</kbd> save &amp; next
-<br><b>In the lower panel:</b> drag a blue line to move it, or drag the red playhead to scrub. Click anywhere else to move the
+<br><b>Wrong word?</b> Double-click it to retype. The original is kept, and the word is outlined in amber.<br>
+<b>In the lower panel:</b> drag a blue line to move it, or drag the red playhead to scrub. Click anywhere else to move the
 playhead, and <b>drag empty space to slide the view</b>. <b>Wheel zooms</b>, shift+wheel scrolls, the bar under the panel scrolls left and right, &ldquo;fit word&rdquo; snaps to the current word and &ldquo;fit all words&rdquo; shows the whole sentence. <b>Every word's marks are drawn</b> &mdash; drag any of them and that word becomes current, or <b>drag the middle of a word to slide the whole tag</b>.
 </div>
 
@@ -390,7 +394,11 @@ function render(){
   const ws=$('words'); ws.innerHTML='';
   gold.forEach((wd,i)=>{const s=document.createElement('span');
     s.className='w'+(i===wi?' cur':(touched.has(i)?' ok':''));
-    s.textContent=wd.word; s.onclick=()=>{wi=i;draw();render();playWord();};
+    s.textContent=wd.word;
+    if(wd.was!==undefined && wd.was!==wd.word) s.classList.add('fixed');
+    s.title='double-click to correct the word';
+    s.onclick=()=>{wi=i;draw();render();playWord();};
+    s.ondblclick=e=>{e.stopPropagation();editWord(i,s);};
     ws.appendChild(s);});
   const me=gold[wi];
   const prevGap=(wi>0)?me.start-gold[wi-1].end:null;
@@ -401,6 +409,33 @@ function render(){
   $('cmp').innerHTML=p.join('');
   $('edStart').classList.toggle('on',edge==='start');
   $('edEnd').classList.toggle('on',edge==='end');
+}
+
+// The transcript is ASR output and is sometimes simply wrong -- a boundary marked around
+// the wrong word is worse than no boundary at all, because it reads as ground truth. The
+// original is kept in `was` so a corrected clip can be told apart from one that was right
+// to begin with; a benchmark cannot mix the two without saying so.
+function editWord(i,span){
+  const before=gold[i].word;
+  const inp=document.createElement('input');
+  inp.className='wedit'; inp.value=before; inp.dir='rtl';
+  span.replaceWith(inp); inp.focus(); inp.select();
+  const done=keep=>{
+    const v=inp.value.trim();
+    if(keep && v && v!==before){
+      if(gold[i].was===undefined) gold[i].was=before;
+      gold[i].word=v;
+      touched.add(i);
+      save();                       // a text fix is worth keeping even if the clip is not finished
+    }
+    render(); draw();
+  };
+  inp.onkeydown=e=>{
+    e.stopPropagation();
+    if(e.key==='Enter'){e.preventDefault();done(true);}
+    if(e.key==='Escape'){e.preventDefault();done(false);}
+  };
+  inp.onblur=()=>done(true);
 }
 
 // Marks stay ordered, but only against their immediate neighbours -- clamping a word's end
@@ -580,6 +615,15 @@ $('prevw').onclick=()=>goWord(wi-1); $('nextw').onclick=()=>goWord(wi+1);
 $('prevc').onclick=()=>{if(ci>0){ci--;loadClip();}};
 $('save').onclick=saveNext;
 $('skip').onclick=()=>{if(ci<clips.length-1){ci++;loadClip();}};
+
+// Persist without advancing: a text correction is worth keeping the moment it is made,
+// even on a clip whose boundaries are not finished.
+async function save(){
+  await fetch(api('/api/gold'),{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({index:ci,key:clips[ci].key,words:gold})});
+  clips[ci].saved=gold.map(w=>({...w}));
+  render();
+}
 
 async function saveNext(){
   await fetch(api('/api/gold'),{method:'POST',headers:{'Content-Type':'application/json'},
