@@ -387,19 +387,31 @@ function draw(){ drawOverview(); drawZoom(); drawScroll(); }
 function tick(){ if(playing)draw();
   $('clock').textContent=mmss(now())+' / '+mmss(total()); requestAnimationFrame(tick); }
 
+// The chips are built once and then only updated. They used to be recreated on every
+// render, which silently broke double-click: the first click of the gesture calls render,
+// the node under the pointer is destroyed and replaced, and the second click lands on a
+// different element, so the browser never reports a double-click at all.
+let chips=[];
+function buildWords(){
+  const ws=$('words'); ws.innerHTML=''; chips=[];
+  gold.forEach((wd,i)=>{
+    const s=document.createElement('span');
+    s.title='double-click to correct the word';
+    s.onclick=()=>{wi=i;draw();render();playWord();};
+    s.ondblclick=e=>{e.stopPropagation();editWord(i,s);};
+    ws.appendChild(s); chips.push(s);
+  });
+}
+
 function render(){
   const c=clips[ci];
   $('bar').innerHTML='clip '+(ci+1)+'/'+clips.length+' &nbsp;·&nbsp; word '+(wi+1)+'/'+gold.length
     +' &nbsp;·&nbsp; <span id="done">'+clips.filter(x=>x.saved).length+' saved</span>';
-  const ws=$('words'); ws.innerHTML='';
-  gold.forEach((wd,i)=>{const s=document.createElement('span');
-    s.className='w'+(i===wi?' cur':(touched.has(i)?' ok':''));
+  if(chips.length!==gold.length || !chips.every(c=>c.parentNode)) buildWords();
+  gold.forEach((wd,i)=>{const s=chips[i];
     s.textContent=wd.word;
-    if(wd.was!==undefined && wd.was!==wd.word) s.classList.add('fixed');
-    s.title='double-click to correct the word';
-    s.onclick=()=>{wi=i;draw();render();playWord();};
-    s.ondblclick=e=>{e.stopPropagation();editWord(i,s);};
-    ws.appendChild(s);});
+    s.className='w'+(i===wi?' cur':(touched.has(i)?' ok':''))
+      +((wd.was!==undefined && wd.was!==wd.word)?' fixed':'');});
   const me=gold[wi];
   const prevGap=(wi>0)?me.start-gold[wi-1].end:null;
   const p=['<span class="pill" style="color:#6aa0ff">'+f3(me.start)+' → '+f3(me.end)+'</span>',
@@ -416,6 +428,7 @@ function render(){
 // original is kept in `was` so a corrected clip can be told apart from one that was right
 // to begin with; a benchmark cannot mix the two without saying so.
 function editWord(i,span){
+  stop();                       // the click that opened this also started playback
   const before=gold[i].word;
   const inp=document.createElement('input');
   inp.className='wedit'; inp.value=before; inp.dir='rtl';
@@ -428,7 +441,7 @@ function editWord(i,span){
       touched.add(i);
       save();                       // a text fix is worth keeping even if the clip is not finished
     }
-    render(); draw();
+    buildWords(); render(); draw();
   };
   inp.onkeydown=e=>{
     e.stopPropagation();
