@@ -81,7 +81,6 @@
     <span class="key"><i class="sw" style="background:#ff5f56"></i>playhead</span>
   </span></div>
 <canvas id="zm"></canvas>
-<audio id="au" preload="auto"></audio>
 <div id="scroll"><div id="thumb"></div></div>
 
 <div class="row">
@@ -129,7 +128,7 @@
 <kbd>w</kbd> the word &nbsp; <kbd>e</kbd> hear after the mark &nbsp;
 <kbd>&larr;</kbd><kbd>&rarr;</kbd> change word &nbsp; <kbd>tab</kbd> switch start/end &nbsp;
 <kbd>f</kbd> put mark at playhead &nbsp;
-<kbd>l</kbd> loop across the mark &nbsp; <kbd>shift+l</kbd> loop the word &nbsp; <kbd>,</kbd><kbd>.</kbd> nudge 10ms &nbsp; <kbd>enter</kbd> save &amp; next
+<kbd>l</kbd> loop across the mark &nbsp; <kbd>shift+l</kbd> loop the word &nbsp; <kbd>shift</kbd>+<kbd>&larr;</kbd><kbd>&rarr;</kbd> nudge mark 25ms &nbsp; <kbd>,</kbd><kbd>.</kbd> nudge 10ms &nbsp; <kbd>enter</kbd> save &amp; next
 <br><b>Wrong word?</b> Double-click it to retype, or clear the box to delete it. Use
 <b>+ add word after</b> for one the transcript missed.<br>
 <b>Corrected words</b> are outlined amber, <b>added</b> ones green. Double-click to retype. The original is kept, and the word is outlined in amber.<br>
@@ -142,8 +141,7 @@ const PARAMS=new URLSearchParams(location.search);
 const TOK=PARAMS.get('t')||'';
 let WHO=PARAMS.get('who')||localStorage.getItem('tagWho')||'';
 // Hosted, the token gates the whole server and `who` decides which file a save lands in,
-// so both have to ride along on every request -- including the <audio> src, which is a
-// browser-issued GET this code never sees.
+// so both have to ride along on every request.
 function api(path){
   const q=new URLSearchParams();
   if(TOK)q.set('t',TOK);
@@ -190,7 +188,6 @@ async function load(){
 }
 async function loadClip(){
   stop();
-  au.src=api('/api/audio/'+ci);
   const c=clips[ci];
   gold=(c.saved||c.a).map(w=>({word:w.word,start:w.start,end:w.end}));
   touched=new Set(c.saved?gold.map((_,i)=>i):[]);
@@ -210,47 +207,92 @@ const tmin=()=>-lead;
 const mark=()=>edge==='end'?gold[wi].end:gold[wi].start;
 
 // ---- transport -----------------------------------------------------------
-// Playback goes through an <audio> element rather than an AudioBufferSourceNode. A buffer
-// source's playbackRate resamples, so half speed drops the pitch an octave and the voice
-// stops sounding like speech -- exactly what you do not want when judging a boundary by ear.
-// preservesPitch makes the browser time-stretch instead, so 0.25x is still the same voice.
-// The decoded buffer is kept, but only for drawing the waveform.
-const au=$('au');
-au.preservesPitch=true; au.mozPreservesPitch=true; au.webkitPreservesPitch=true;
-// `head` is the playhead, and it is OUR state, not the element's. Reading currentTime while
-// paused meant every drag had to seek the element, and those seeks are async and coalesced,
-// so the marker lagged or stuck. The element is seeked once, when playback actually starts.
-function now(){ return playing ? Math.max(tmin(),Math.min(au.currentTime-lead,total())) : head; }
+// Playback runs on the Web Audio clock, not on an <audio> element.
+//
+// The element reported exact times -- seeks landed to the microsecond and currentTime
+// advanced in ~6ms steps -- but a bounded region still took 50ms longer than it should at
+// 1x and 100ms at 0.5x, because play() and pause() are not instant. That slop is audible at
+// exactly the moment it matters: asking to hear "up to the mark" played past the mark, so
+// the boundary you are trying to judge is not the boundary you hear.
+//
+// A buffer source is scheduled instead: start(when, offset, duration) begins and ends in
+// the audio thread, sample-accurate, with nothing polling and no start-up cost per region.
+let srcNode=null, ctxT0=0, headT0=0;
+
+// Slower speeds still must not drop the pitch, and Web Audio has no time-stretch of its own
+// (playbackRate resamples, which is the pitch drop we removed earlier). So the buffer is
+// stretched once per speed, overlap-add with a short correlation search to keep successive
+// windows in phase, and then played at 1x. Cached: a clip is a few seconds and there are
+// four non-unity speeds.
+const stretchCache=new Map();
+function stretched(r){
+  if(r===1) return buf;
+  const key=r+'@'+ci;
+  if(stretchCache.has(key)) return stretchCache.get(key);
+  const sr=buf.sampleRate, inp=buf.getChannelData(0);
+  const N=Math.round(0.046*sr), Hs=N>>1, Ha=Math.max(1,Math.round(Hs*r));
+  const search=Math.round(0.008*sr);
+  const outLen=Math.ceil(inp.length/r)+N;
+  const out=new Float32Array(outLen);
+  const win=new Float32Array(N);
+  for(let i=0;i<N;i++) win[i]=0.5-0.5*Math.cos(2*Math.PI*i/(N-1));
+  let ai=0, si=0, prev=null;
+  while(ai+N<inp.length && si+N<outLen){
+    let at=Math.round(ai);
+    if(prev){
+      let bestScore=-Infinity, best=at;
+      const lo=Math.max(0,at-search), hi=Math.min(inp.length-N,at+search);
+      for(let c=lo;c<=hi;c+=2){
+        let acc=0;
+        for(let k=0;k<Hs;k+=4) acc+=inp[c+k]*prev[k];
+        if(acc>bestScore){bestScore=acc;best=c;}
+      }
+      at=best;
+    }
+    for(let k=0;k<N;k++) out[si+k]+=inp[at+k]*win[k];
+    prev=inp.subarray(at+Hs, at+Hs+Hs);
+    ai+=Ha; si+=Hs;
+  }
+  const b=ctx.createBuffer(1,outLen,sr);
+  b.copyToChannel(out,0);
+  stretchCache.set(key,b);
+  return b;
+}
+
+function now(){
+  if(!playing) return head;
+  return Math.max(tmin(), Math.min(headT0+(ctx.currentTime-ctxT0)*rate, total()));
+}
 function label(){ $('play').innerHTML = playing?'&#10074;&#10074; pause':'&#9654; play'; }
-function stop(){ if(stopAt){clearInterval(stopAt);stopAt=null;}
-  if(playing) head=Math.max(tmin(),Math.min(au.currentTime-lead,total()));
-  au.pause(); playing=false; label(); }
-let stopAt=null;
+function stop(){
+  if(playing) head=now();
+  if(srcNode){ srcNode.onended=null; try{srcNode.stop();}catch(e){} srcNode=null; }
+  playing=false; label();
+}
 function start(from,to){
   if(!buf)return;
-  if(stopAt){clearInterval(stopAt);stopAt=null;}
+  stop();
   seg=(to!=null)?[from,to]:null;
   head=Math.max(tmin(),Math.min(from,total()));
   if(to!=null && to-head<=.01){draw();return;}
-  au.playbackRate=rate;
-  // Setting currentTime on an element that has not buffered enough is silently ignored, so
-  // playback would begin from wherever it already was rather than from the mark. Wait for
-  // it to be seekable, then seek, then play.
-  const go=()=>{ au.currentTime=head+lead; au.play().catch(()=>{}); };
-  if(au.readyState>=1) go(); else au.addEventListener('loadedmetadata',go,{once:true});
+  if(ctx.state==='suspended') ctx.resume();
+  const b=stretched(rate);
+  // App time -> offset in the (possibly stretched) buffer. Time 0 is `lead` into the clip,
+  // because PAD seconds of context are served before it.
+  const offset=(head+lead)/rate;
+  const dur=(to!=null? to-head : total()-head)/rate;
+  if(!(dur>0)) {draw();return;}
+  const src=ctx.createBufferSource();
+  src.buffer=b; src.connect(ctx.destination);
+  src.onended=()=>{
+    if(src!==srcNode) return;          // superseded by a newer region
+    srcNode=null;
+    if(loopKind){ const sp=loopSpan(); start(sp[0],sp[1]); return; }
+    playing=false; head=(to!=null)?to:total(); label(); draw();
+  };
+  src.start(ctx.currentTime, Math.max(0,offset), dur);
+  srcNode=src; ctxT0=ctx.currentTime; headT0=head;
   playing=true; label();
-  // The element has no "play until t" so the end is watched. 10 ms is well inside a frame.
-  stopAt=setInterval(()=>{
-    const t=now();
-    if(to!=null && t>=to-0.005){
-      if(loopKind){ const sp=loopSpan(); start(sp[0],sp[1]); return; }
-      stop(); head=to; draw(); return;
-    }
-    if(au.ended||t>=total()-0.005){
-      if(loopKind){ const sp=loopSpan(); start(sp[0],sp[1]); return; }
-      stop(); head=total(); draw();
-    }
-  },10);
 }
 function loopSpan(){
   return loopKind==='word' ? [gold[wi].start,gold[wi].end]
@@ -665,7 +707,11 @@ $('tostart').onclick=()=>moveHead(0);
 $('pbefore').onclick=playBefore; $('pword').onclick=playWord; $('pafter').onclick=playAfter;
 $('loopWord').onclick=()=>setLoop('word');
 $('loopMark').onclick=()=>setLoop('mark');
-$('rate').onchange=e=>{rate=parseFloat(e.target.value); au.playbackRate=rate;};
+$('rate').onchange=e=>{
+  const was=playing, at=now(), span=seg;
+  rate=parseFloat(e.target.value);
+  if(was) start(at, span?span[1]:null);
+};
 $('edStart').onclick=()=>{edge='start';draw();render();};
 $('edEnd').onclick=()=>{edge='end';draw();render();};
 $('setb').onclick=()=>setMark(now());
@@ -710,6 +756,10 @@ addEventListener('keydown',async e=>{
   if(e.key==='l'){setLoop('mark');return;}
   if(e.key==='L'){setLoop('word');return;}
   if(e.key==='Home'){moveHead(0);return;}
+  // Shift+arrow nudges the mark you are on by 25ms, so a whole clip can be marked without
+  // touching the mouse: tab switches start/end, q/w/e play around it, shift+arrows move it.
+  if(e.key==='ArrowLeft'&&e.shiftKey){e.preventDefault();setMark(mark()-.025);return;}
+  if(e.key==='ArrowRight'&&e.shiftKey){e.preventDefault();setMark(mark()+.025);return;}
   if(e.key==='ArrowLeft'){e.preventDefault();goWord(wi-1);return;}
   if(e.key==='ArrowRight'){e.preventDefault();goWord(wi+1);return;}
   if(e.key==='f'){setMark(now());return;}
