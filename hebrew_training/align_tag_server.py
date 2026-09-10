@@ -72,6 +72,13 @@ def parse_args() -> argparse.Namespace:
         "just stops a stray crawler writing to your gold set.",
     )
     parser.add_argument(
+        "--auth",
+        choices=["xhost"],
+        help="Require Google sign-in, verifying xhostd's signed cookie. Identity then comes "
+        "from the cookie and ?who= is ignored, which is what stops an annotator writing as "
+        "someone else. Needs a database for the name bindings.",
+    )
+    parser.add_argument(
         "--split",
         action="store_true",
         help="Hand each annotator their own clips, so nobody marks the same sentence "
@@ -239,6 +246,70 @@ def page() -> bytes:
 
 _NAME = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 
+AUTH_ISSUER = "https://auth.xhostd.com"
+JWKS_URL = "https://auth.xhostd.com/xhost-auth/jwks"
+COOKIE = "__Host-xhost_id"
+_JWKS: dict = {"keys": [], "fetched": 0.0}
+
+
+def jwks() -> dict:
+    """The signing keys, cached for an hour. Refetched on an unknown kid so a rotation does
+    not lock everybody out until the cache expires."""
+    import urllib.request
+
+    if _JWKS["keys"] and time.time() - _JWKS["fetched"] < 3600:
+        return _JWKS
+    with urllib.request.urlopen(JWKS_URL, timeout=10) as handle:
+        _JWKS["keys"] = json.loads(handle.read().decode("utf-8")).get("keys", [])
+    _JWKS["fetched"] = time.time()
+    return _JWKS
+
+
+def identity(cookie_header: str, host: str) -> dict | None:
+    """The signed-in user, or None.
+
+    The token is verified properly -- RS256 pinned, issuer and audience checked, signature
+    against the published keys. A decode-only read would accept anything a caller cared to
+    forge, and the whole point of this is that an annotator cannot write as someone else.
+    """
+    import jwt
+    from jwt import PyJWKSet
+
+    token = ""
+    for part in (cookie_header or "").split(";"):
+        name, _, value = part.strip().partition("=")
+        if name == COOKIE:
+            token = value
+            break
+    if not token:
+        return None
+
+    try:
+        kid = jwt.get_unverified_header(token).get("kid")
+        keys = PyJWKSet.from_dict(jwks())
+        signing = next((k for k in keys.keys if k.key_id == kid), None)
+        if signing is None:
+            _JWKS["fetched"] = 0.0  # a rotated key; refetch once before giving up
+            keys = PyJWKSet.from_dict(jwks())
+            signing = next((k for k in keys.keys if k.key_id == kid), None)
+        if signing is None:
+            return None
+        claims = jwt.decode(
+            token,
+            signing.key,
+            algorithms=["RS256"],
+            issuer=AUTH_ISSUER,
+            audience=host,
+            options={"require": ["exp", "iss", "aud", "sub"]},
+        )
+    except Exception:  # noqa: BLE001 -- any failure is simply "not signed in"
+        return None
+    return {
+        "sub": claims["sub"],
+        "email": claims.get("email", ""),
+        "display": claims.get("name") or claims.get("email", ""),
+    }
+
 
 class PostgresStore:
     """Marks in Postgres, for hosts whose container disk does not survive a redeploy.
@@ -259,6 +330,13 @@ class PostgresStore:
                 "  annotator TEXT PRIMARY KEY,"
                 "  payload   JSONB NOT NULL,"
                 "  updated_at TIMESTAMPTZ NOT NULL DEFAULT now())"
+            )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS identities ("
+                "  sub     TEXT PRIMARY KEY,"
+                "  name    TEXT NOT NULL UNIQUE,"
+                "  email   TEXT,"
+                "  display TEXT)"
             )
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS claims ("
@@ -313,6 +391,31 @@ class PostgresStore:
             conn.execute(
                 "UPDATE claims SET done = true WHERE clip_key = %s AND annotator = %s", (key, who)
             )
+
+    def binding(self, sub: str) -> str | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT name FROM identities WHERE sub = %s", (sub,)).fetchone()
+        return row[0] if row else None
+
+    def bind(self, sub: str, name: str, email: str, display: str) -> str | None:
+        """Tie a Google account to an annotator name. Returns the bound name, or None when
+        the name already belongs to somebody else.
+
+        The existing marks are filed under short names chosen before there was any sign-in,
+        so the first login has to be able to claim one -- otherwise turning auth on orphans
+        everybody's work.
+        """
+        with self.connect() as conn:
+            held = conn.execute("SELECT sub FROM identities WHERE name = %s", (name,)).fetchone()
+            if held and held[0] != sub:
+                return None
+            conn.execute(
+                "INSERT INTO identities (sub, name, email, display) VALUES (%s,%s,%s,%s)"
+                " ON CONFLICT (sub) DO UPDATE SET name = EXCLUDED.name,"
+                "   email = EXCLUDED.email, display = EXCLUDED.display",
+                (sub, name, email, display),
+            )
+        return name
 
     def progress(self) -> list[dict]:
         """Who has marked what. With the tool open to more than one person there is
@@ -511,7 +614,24 @@ def make_handler(args, clips, saved):
             self.end_headers()
             self.wfile.write(body)
 
+        def signed_in(self):
+            """The verified Google account, when auth is on."""
+            if not args.auth:
+                return None
+            host = self.headers.get("Host", "").split(":")[0]
+            return identity(self.headers.get("Cookie", ""), host)
+
         def who(self):
+            """The annotator whose marks this request touches.
+
+            With auth on this comes from the verified cookie, so `?who=` is ignored -- it is
+            what let anyone write as anyone.
+            """
+            if args.auth:
+                person = self.signed_in()
+                if not person or STORE is None:
+                    return None
+                return STORE.binding(person["sub"])
             from urllib.parse import parse_qs
 
             name = (parse_qs(urlparse(self.path).query).get("who") or [""])[0]
@@ -534,6 +654,32 @@ def make_handler(args, clips, saved):
                 return self.send(200, page(), "text/html; charset=utf-8")
             if not self.authorised():
                 return self.send(403, b"bad or missing token", "text/plain")
+            if route == "/api/me":
+                person = self.signed_in()
+                body = {
+                    "auth": bool(args.auth),
+                    "logged_in": bool(person),
+                    "login_url": "/xhost-auth/login?return_to=/",
+                    "logout_url": "/xhost-auth/logout?return_to=/",
+                }
+                if person:
+                    body.update(
+                        {
+                            "display": person["display"],
+                            "email": person["email"],
+                            "name": STORE.binding(person["sub"]) if STORE else None,
+                        }
+                    )
+                return self.send(
+                    200,
+                    json.dumps(body, ensure_ascii=False).encode("utf-8"),
+                    "application/json; charset=utf-8",
+                )
+            if args.auth and route.startswith("/api/") and route != "/api/progress":
+                if not self.signed_in():
+                    return self.send(401, b'{"error":"sign in"}', "application/json")
+                if not self.who():
+                    return self.send(409, b'{"error":"pick a name"}', "application/json")
             if route == "/api/meta":
                 meta = {"multi": bool(args.multi), "clips": len(clips)}
                 return self.send(200, json.dumps(meta).encode("utf-8"), "application/json")
@@ -620,7 +766,24 @@ def make_handler(args, clips, saved):
         def do_POST(self):
             if not self.authorised():
                 return self.send(403, b"bad or missing token", "text/plain")
-            if urlparse(self.path).path != "/api/gold":
+            route = urlparse(self.path).path
+            if route == "/api/claim-name":
+                person = self.signed_in()
+                if not person or STORE is None:
+                    return self.send(401, b'{"error":"sign in"}', "application/json")
+                length = int(self.headers.get("Content-Length", 0))
+                wanted = json.loads(self.rfile.read(length).decode("utf-8")).get("name", "")
+                if not _NAME.match(wanted):
+                    return self.send(400, b'{"error":"bad name"}', "application/json")
+                bound = STORE.bind(person["sub"], wanted, person["email"], person["display"])
+                if bound is None:
+                    return self.send(409, b'{"error":"taken"}', "application/json")
+                return self.send(
+                    200, json.dumps({"name": bound}).encode("utf-8"), "application/json"
+                )
+            if args.auth and not self.who():
+                return self.send(401, b'{"error":"sign in"}', "application/json")
+            if route != "/api/gold":
                 return self.send(404, b"not found", "text/plain")
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length).decode("utf-8"))
@@ -674,6 +837,10 @@ def main() -> None:
     if database:
         STORE = PostgresStore(database)
         print("marks -> Postgres (DATABASE_URL)")
+    if args.auth and STORE is None:
+        raise SystemExit("--auth needs DATABASE_URL: the name bindings live in the database")
+    if args.auth:
+        print("google sign-in required; ?who= ignored")
     if args.split:
         CLAIMS = STORE if STORE is not None else FileClaims(args.out)
         print(f"split mode: each annotator gets their own clips, {BLOCK} at a time")

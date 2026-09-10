@@ -58,8 +58,9 @@
 
 <div id="gate"><div class="card">
   <h2>Hebrew alignment tagging</h2>
-  <p>Your name keeps your marks in their own file, so several people can mark the same
-     clips and we can measure how much they agree.</p>
+  <p id="gatetext">Your name keeps your marks in their own file, so several people can mark
+     the same clips and we can measure how much they agree.</p>
+  <button id="gsignin" hidden>Sign in with Google</button>
   <form id="whoform">
     <input id="whoin" placeholder="name (letters, digits, - or _)" autocomplete="off" spellcheck="false">
     <button id="whogo" type="submit">Start marking</button>
@@ -161,18 +162,62 @@ const mmss=t=>{t=Math.max(0,t);return Math.floor(t/60)+':'+(t%60).toFixed(2).pad
 
 const NAME=/^[A-Za-z0-9_-]{1,32}$/;
 
+let ME=null;
+
 async function boot(){
+  ME=await (await fetch(api('/api/me'))).json();
+  if(ME.auth){
+    if(!ME.logged_in) return signIn();
+    // Signed in but no annotator name yet. The marks made before sign-in existed are filed
+    // under short names, so the first login gets to claim one rather than orphan the work.
+    if(!ME.name) return gate(true);
+    WHO=ME.name; return started();
+  }
   const meta=await (await fetch(api('/api/meta'))).json();
-  if(meta.multi && !NAME.test(WHO)) return gate();
+  if(meta.multi && !NAME.test(WHO)) return gate(false);
   if(meta.multi) $('me').textContent='marking as '+WHO;
   return load();
 }
-function gate(){
-  const g=$('gate'); g.classList.add('on'); $('whoin').focus();
-  const go=()=>{
+
+function started(){
+  $('gate').classList.remove('on');
+  $('me').innerHTML='marking as <b>'+WHO+'</b>'
+    +(ME&&ME.display?' &middot; '+ME.display:'')
+    +(ME&&ME.logout_url?' &middot; <a href="'+ME.logout_url+'">sign out</a>':'');
+  load();
+}
+
+function signIn(){
+  const g=$('gate'); g.classList.add('on');
+  $('whoform').hidden=true;
+  $('gatetext').textContent='Sign in so your marks are yours: nobody else can save under '
+    +'your name, and you keep the same work across devices.';
+  const b=$('gsignin'); b.hidden=false;
+  b.onclick=()=>{ location.href=ME.login_url; };
+}
+
+function gate(authed){
+  const g=$('gate'); g.classList.add('on');
+  $('gsignin').hidden=true; $('whoform').hidden=false;
+  if(authed){
+    $('gatetext').textContent='Signed in as '+ME.display
+      +'. Pick the name your marks are filed under — if you have marked before, '
+      +'type that same name to claim your existing work.';
+    if(!$('whoin').value) $('whoin').value=(ME.email||'').split('@')[0].slice(0,32);
+  }
+  $('whoin').focus(); $('whoin').select();
+  const go=async ()=>{
     const v=$('whoin').value.trim();
     if(!NAME.test(v)){ $('whoerr').textContent=
       'Letters, digits, - and _ only, up to 32 characters.'; return; }
+    if(authed){
+      const r=await fetch(api('/api/claim-name'),{method:'POST',
+        headers:{'Content-Type':'application/json'},body:JSON.stringify({name:v})});
+      if(r.status===409){ $('whoerr').textContent=
+        'That name belongs to another account. Pick a different one.'; return; }
+      if(!r.ok){ $('whoerr').textContent='Could not save that name. Try again.'; return; }
+      WHO=v; return started();
+    }
     WHO=v; localStorage.setItem('tagWho',v);
     g.classList.remove('on'); $('me').textContent='marking as '+WHO;
     load();
@@ -181,6 +226,7 @@ function gate(){
   // riding on a keydown handler.
   $('whoform').onsubmit=e=>{ e.preventDefault(); go(); };
 }
+
 async function load(){
   clips=await (await fetch(api('/api/clips'))).json();
   ci=clips.findIndex(c=>!c.saved); if(ci<0)ci=0;

@@ -11,4 +11,5 @@ exec python -m hebrew_training.align_tag_server \
   --b data/gold_set/B_mms.jsonl \
   --clips-root data/gold_set/clips \
   --out /tmp/marks --multi --split --limit 134 \
+  ${TAG_AUTH:+--auth "$TAG_AUTH"} \
   --host 0.0.0.0 --port "$XHOST_HTTP_PORT"
