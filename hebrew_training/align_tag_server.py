@@ -314,6 +314,33 @@ class PostgresStore:
                 "UPDATE claims SET done = true WHERE clip_key = %s AND annotator = %s", (key, who)
             )
 
+    def progress(self) -> list[dict]:
+        """Who has marked what. With the tool open to more than one person there is
+        otherwise no way to see that anyone has been working, or who."""
+        with self.connect() as conn:
+            marks = conn.execute(
+                "SELECT annotator, jsonb_array_length(payload),"
+                "       EXTRACT(EPOCH FROM updated_at)"
+                "  FROM marks"
+            ).fetchall()
+            held = conn.execute(
+                "SELECT annotator, count(*) FROM claims WHERE done = false GROUP BY annotator"
+            ).fetchall()
+        holding = {r[0]: int(r[1]) for r in held}
+        rows = [
+            {
+                "name": r[0],
+                "marked": int(r[1]),
+                "holding": holding.get(r[0], 0),
+                "last": float(r[2]),
+            }
+            for r in marks
+        ]
+        for name, count in holding.items():
+            if not any(r["name"] == name for r in rows):
+                rows.append({"name": name, "marked": 0, "holding": count, "last": None})
+        return sorted(rows, key=lambda r: (r["last"] or 0), reverse=True)
+
     def save(self, who: str, clips: list[dict], saved: dict[int, list]) -> None:
         payload = [gold_row(clips[i], saved[i]) for i in sorted(saved)]
         with self.connect() as conn:
@@ -510,6 +537,34 @@ def make_handler(args, clips, saved):
             if route == "/api/meta":
                 meta = {"multi": bool(args.multi), "clips": len(clips)}
                 return self.send(200, json.dumps(meta).encode("utf-8"), "application/json")
+            if route == "/api/progress":
+                if STORE is not None:
+                    rows = STORE.progress()
+                else:
+                    rows = []
+                    directory = args.out if args.multi else args.out.parent
+                    for f in sorted(directory.glob("*.jsonl")):
+                        lines = [
+                            ln for ln in f.read_text(encoding="utf-8").splitlines() if ln.strip()
+                        ]
+                        rows.append(
+                            {
+                                "name": f.stem,
+                                "marked": len(lines),
+                                "holding": 0,
+                                "last": f.stat().st_mtime,
+                            }
+                        )
+                body = {
+                    "clips": len(clips),
+                    "annotators": rows,
+                    "marked_total": sum(r["marked"] for r in rows),
+                }
+                return self.send(
+                    200,
+                    json.dumps(body, ensure_ascii=False).encode("utf-8"),
+                    "application/json; charset=utf-8",
+                )
             if route == "/api/clips":
                 who = self.who() or "anon"
                 if STORE is not None:
