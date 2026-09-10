@@ -196,7 +196,7 @@ async function loadClip(){
   const ab=await r.arrayBuffer();
   ctx=ctx||new (window.AudioContext||window.webkitAudioContext)();
   buf=await ctx.decodeAudioData(ab);
-  peaks=null; view=null; draw(); render();
+  peaks=null; view=null; stretchCache.clear(); draw(); render();
 }
 const total=()=>buf?buf.duration-lead:0;
 // The served audio starts `lead` seconds BEFORE the row, so time -lead is the first sample
@@ -710,6 +710,9 @@ $('loopMark').onclick=()=>setLoop('mark');
 $('rate').onchange=e=>{
   const was=playing, at=now(), span=seg;
   rate=parseFloat(e.target.value);
+  // Build it now. Stretching a clip takes about as long as playing a word, and paying that
+  // on the first press of play reads as the transport being broken.
+  if(buf) stretched(rate);
   if(was) start(at, span?span[1]:null);
 };
 $('edStart').onclick=()=>{edge='start';draw();render();};
