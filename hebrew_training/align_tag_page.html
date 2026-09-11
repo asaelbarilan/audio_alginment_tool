@@ -13,6 +13,8 @@
  .w.fixed{outline:1px solid #d8a13a}
  .w.added{outline:1px solid #4ec98a}
  button.danger{color:#e88}
+ #dl{color:#6aa0ff;font-size:13px;text-decoration:none;align-self:center}
+ #dl:hover{text-decoration:underline}
  .wedit{font:inherit;direction:rtl;background:#14161a;color:#e8e8ea;border:1px solid #d8a13a;
         border-radius:4px;padding:3px 8px;min-width:80px}
  #gate{position:fixed;inset:0;background:#14161a;display:none;align-items:center;
@@ -122,6 +124,8 @@
   <button id="prevc">&larr; prev clip</button>
   <button id="save" class="go">save &amp; next clip</button>
   <button id="skip">skip clip</button>
+  <div class="sep"></div>
+  <a id="dl" href="/api/export" download="gold.jsonl">download all marks</a>
 </div>
 
 <div id="hint">

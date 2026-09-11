@@ -417,6 +417,12 @@ class PostgresStore:
             )
         return name
 
+    def everything(self) -> list[tuple[str, list]]:
+        """Every annotator's marks, for export."""
+        with self.connect() as conn:
+            rows = conn.execute("SELECT annotator, payload FROM marks").fetchall()
+        return [(r[0], r[1]) for r in rows]
+
     def progress(self) -> list[dict]:
         """Who has marked what. With the tool open to more than one person there is
         otherwise no way to see that anyone has been working, or who."""
@@ -683,6 +689,35 @@ def make_handler(args, clips, saved):
             if route == "/api/meta":
                 meta = {"multi": bool(args.multi), "clips": len(clips)}
                 return self.send(200, json.dumps(meta).encode("utf-8"), "application/json")
+            if route == "/api/export":
+                # The marks live in Postgres once hosted, but the rest of the pipeline reads
+                # jsonl -- alignment_disagreement.py keys on (path, start). So export in
+                # exactly the input manifest's shape, with the annotator added, and nothing
+                # else: a file that needs converting before it can be scored is a file that
+                # will be scored wrong.
+                lines = []
+                if STORE is not None:
+                    for name, payload in STORE.everything():
+                        for row in payload:
+                            lines.append(json.dumps({**row, "annotator": name}, ensure_ascii=False))
+                else:
+                    directory = args.out if args.multi else args.out.parent
+                    for f in sorted(directory.glob("*.jsonl")):
+                        for line in f.read_text(encoding="utf-8").splitlines():
+                            if line.strip():
+                                lines.append(
+                                    json.dumps(
+                                        {**json.loads(line), "annotator": f.stem},
+                                        ensure_ascii=False,
+                                    )
+                                )
+                blob = ("\n".join(lines) + "\n").encode("utf-8")
+                return self.send(
+                    200,
+                    blob,
+                    "application/x-ndjson; charset=utf-8",
+                    {"Content-Disposition": 'attachment; filename="gold.jsonl"'},
+                )
             if route == "/api/progress":
                 if STORE is not None:
                     rows = STORE.progress()
