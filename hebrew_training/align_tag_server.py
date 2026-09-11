@@ -844,15 +844,18 @@ def make_handler(args, clips, saved):
                         client = s3_client()
                         held, token = 0, None
                         while True:
-                            page = client.list_objects_v2(
+                            # not `page`: that is the module function serving the HTML, and
+                            # shadowing it here makes it local to the whole handler, so
+                            # GET / would raise and the health check would call the app dead
+                            listing = client.list_objects_v2(
                                 **{
                                     "Bucket": os.environ["S3_BUCKET"],
                                     "Prefix": args.clips_s3,
                                     **({"ContinuationToken": token} if token else {}),
                                 }
                             )
-                            held += page.get("KeyCount", 0)
-                            token = page.get("NextContinuationToken")
+                            held += listing.get("KeyCount", 0)
+                            token = listing.get("NextContinuationToken")
                             if not token:
                                 break
                         body["audio"] = {"source": "bucket", "objects": held}
