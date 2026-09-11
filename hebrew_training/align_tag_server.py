@@ -836,6 +836,30 @@ def make_handler(args, clips, saved):
                     "annotators": rows,
                     "marked_total": sum(r["marked"] for r in rows),
                 }
+                # Where the audio is actually coming from. Without this there is no way to
+                # tell from outside whether the bucket is populated, and the image copy
+                # cannot safely be removed on a guess.
+                if args.clips_s3:
+                    try:
+                        client = s3_client()
+                        held, token = 0, None
+                        while True:
+                            page = client.list_objects_v2(
+                                **{
+                                    "Bucket": os.environ["S3_BUCKET"],
+                                    "Prefix": args.clips_s3,
+                                    **({"ContinuationToken": token} if token else {}),
+                                }
+                            )
+                            held += page.get("KeyCount", 0)
+                            token = page.get("NextContinuationToken")
+                            if not token:
+                                break
+                        body["audio"] = {"source": "bucket", "objects": held}
+                    except Exception as exc:  # noqa: BLE001
+                        body["audio"] = {"source": "bucket", "error": type(exc).__name__}
+                else:
+                    body["audio"] = {"source": "image"}
                 return self.send(
                     200,
                     json.dumps(body, ensure_ascii=False).encode("utf-8"),
