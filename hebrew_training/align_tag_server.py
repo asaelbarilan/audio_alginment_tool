@@ -93,6 +93,12 @@ def parse_args() -> argparse.Namespace:
         "agreement between people measured.",
     )
     parser.add_argument(
+        "--clips-s3",
+        help="Read clips from the channel's object store under this key prefix (e.g. "
+        "'clips/') instead of from the image. Any clip the bucket is missing is copied up "
+        "from the image at startup, so the move needs no external blob access.",
+    )
+    parser.add_argument(
         "--clips-root",
         type=Path,
         help="Look every clip up by file name in this directory instead of the absolute "
@@ -195,6 +201,76 @@ def build_clips(args) -> list[dict]:
     return clips[: args.limit]
 
 
+_S3_CACHE: dict[str, bytes] = {}
+_S3_ORDER: list[str] = []
+S3_CACHE_MAX = 48  # ~15 MB of wav; enough that a person working through a block re-reads
+#                    nothing, small enough not to hold the whole corpus in memory
+
+
+def s3_client():
+    """Built from the injected environment only. S3_ENDPOINT inside the container is a
+    platform-internal address, so constructing it from the hostname would point at the
+    wrong place."""
+    import boto3
+
+    return boto3.client(
+        "s3",
+        endpoint_url=os.environ["S3_ENDPOINT"],
+        region_name=os.environ.get("S3_REGION", "us-east-1"),
+        aws_access_key_id=os.environ["S3_ACCESS_KEY_ID"],
+        aws_secret_access_key=os.environ["S3_SECRET_ACCESS_KEY"],
+    )
+
+
+def s3_bytes(key: str) -> bytes:
+    hit = _S3_CACHE.get(key)
+    if hit is not None:
+        return hit
+    body = s3_client().get_object(Bucket=os.environ["S3_BUCKET"], Key=key)["Body"].read()
+    _S3_CACHE[key] = body
+    _S3_ORDER.append(key)
+    while len(_S3_ORDER) > S3_CACHE_MAX:
+        _S3_CACHE.pop(_S3_ORDER.pop(0), None)
+    return body
+
+
+def push_clips(clips: list[dict], prefix: str, root: Path | None) -> None:
+    """Copy any clip the bucket is missing up from the image, once, at startup.
+
+    The audio used to be baked into the container, which meant every deploy rebuilt and
+    shipped the whole corpus. Migrating from inside the container uses the credentials the
+    platform already injects, so it needs no external blob access -- which is a console
+    toggle this has no way to set.
+    """
+    client = s3_client()
+    bucket = os.environ["S3_BUCKET"]
+    have = set()
+    token = None
+    while True:
+        page = client.list_objects_v2(
+            **{
+                "Bucket": bucket,
+                "Prefix": prefix,
+                **({"ContinuationToken": token} if token else {}),
+            }
+        )
+        have.update(o["Key"] for o in page.get("Contents", []))
+        token = page.get("NextContinuationToken")
+        if not token:
+            break
+    sent = 0
+    for clip in clips:
+        key = prefix + Path(str(clip["path"]).replace(chr(92), "/")).name
+        if key in have:
+            continue
+        local = resolve(clip["path"], root)
+        if not local.exists():
+            continue
+        client.put_object(Bucket=bucket, Key=key, Body=local.read_bytes(), ContentType="audio/wav")
+        sent += 1
+    print(f"clips in bucket: {len(have) + sent} ({sent} uploaded from the image)")
+
+
 def resolve(path_value: str, root: Path | None) -> Path:
     """The clip file, rebased onto --clips-root when one is given."""
     # PurePath cannot split a Windows path on Linux, so take the basename by hand.
@@ -202,7 +278,9 @@ def resolve(path_value: str, root: Path | None) -> Path:
     return (root / name) if root else Path(path_value)
 
 
-def clip_wav(clip: dict, root: Path | None = None) -> tuple[bytes, float]:
+def clip_wav(
+    clip: dict, root: Path | None = None, prefix: str | None = None
+) -> tuple[bytes, float]:
     """The clip's audio as wav bytes, with PAD seconds of context either side.
 
     Prefers plain soundfile, because that keeps the tool deployable: reading a window out of
@@ -218,8 +296,14 @@ def clip_wav(clip: dict, root: Path | None = None) -> tuple[bytes, float]:
     want = clip["duration"] + lead + PAD
     path = resolve(clip["path"], root)
 
-    if path.suffix.lower() == ".wav" and path.exists():
-        with soundfile.SoundFile(path) as handle:
+    if prefix is not None:
+        key = prefix + Path(str(clip["path"]).replace(chr(92), "/")).name
+        source = io.BytesIO(s3_bytes(key))
+    else:
+        source = path if (path.suffix.lower() == ".wav" and path.exists()) else None
+
+    if source is not None:
+        with soundfile.SoundFile(source) as handle:
             rate = handle.samplerate
             handle.seek(int(begin * rate))
             wav = handle.read(int(want * rate), dtype="float32", always_2d=False)
@@ -777,7 +861,7 @@ def make_handler(args, clips, saved):
             if route.startswith("/api/audio/"):
                 index = int(route.rsplit("/", 1)[1])
                 try:
-                    data, lead = clip_wav(clips[index], args.clips_root)
+                    data, lead = clip_wav(clips[index], args.clips_root, args.clips_s3)
                 except Exception as exc:  # noqa: BLE001 -- a bad clip must not kill the server
                     return self.send(500, str(exc).encode(), "text/plain")
                 headers = {"X-Lead": f"{lead:.4f}", "Accept-Ranges": "bytes"}
@@ -889,7 +973,13 @@ def main() -> None:
     if saved:
         print(f"resuming: {len(saved)} clips already marked")
 
-    missing = [c for c in clips if not resolve(c["path"], args.clips_root).exists()]
+    if args.clips_s3:
+        push_clips(clips, args.clips_s3, args.clips_root)
+    missing = (
+        []
+        if args.clips_s3
+        else [c for c in clips if not resolve(c["path"], args.clips_root).exists()]
+    )
     if missing:
         hint = " (try --clips-root)" if not args.clips_root else ""
         first = resolve(missing[0]["path"], args.clips_root)
