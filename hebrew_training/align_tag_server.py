@@ -207,19 +207,30 @@ S3_CACHE_MAX = 48  # ~15 MB of wav; enough that a person working through a block
 #                    nothing, small enough not to hold the whole corpus in memory
 
 
+_S3 = None
+
+
 def s3_client():
     """Built from the injected environment only. S3_ENDPOINT inside the container is a
     platform-internal address, so constructing it from the hostname would point at the
-    wrong place."""
+    wrong place.
+
+    Made once: botocore builds a signer and loads service models per client, which is not
+    something to repeat on every clip.
+    """
+    global _S3
+    if _S3 is not None:
+        return _S3
     import boto3
 
-    return boto3.client(
+    _S3 = boto3.client(
         "s3",
         endpoint_url=os.environ["S3_ENDPOINT"],
         region_name=os.environ.get("S3_REGION", "us-east-1"),
         aws_access_key_id=os.environ["S3_ACCESS_KEY_ID"],
         aws_secret_access_key=os.environ["S3_SECRET_ACCESS_KEY"],
     )
+    return _S3
 
 
 def s3_bytes(key: str) -> bytes:
