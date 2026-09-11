@@ -126,7 +126,7 @@ def load(path: Path) -> dict[tuple[str, float], dict]:
                 row = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            rows[(row["path"], round(float(row.get("start", 0.0)), 3))] = row
+            rows[clip_key(row)] = row
     return rows
 
 
@@ -173,7 +173,7 @@ def build_clips(args) -> list[dict]:
         clips.append(
             {
                 "path": row["path"],
-                "start": key[1],
+                "start": round(float(row.get("start", 0.0)), 3),
                 "duration": float(row["duration"]),
                 "transcript": row.get("transcript", ""),
                 "a": [
@@ -600,7 +600,13 @@ class FileClaims:
 
 
 def clip_key(clip: dict) -> str:
-    """Stable id for a clip, independent of its position in the sorted list."""
+    """Stable id for a clip: its file name and start.
+
+    Deliberately not the full path. The manifests were written with absolute Windows paths,
+    marks already in the database carry those, and a published dataset has to use relative
+    ones -- keying on the name lets all three refer to the same clip, so changing how paths
+    are written does not orphan work already done.
+    """
     name = str(clip["path"]).replace("\\", "/").rsplit("/", 1)[-1]
     return f"{name}@{round(float(clip['start']), 3)}"
 
@@ -664,10 +670,10 @@ def gold_row(clip: dict, words: list) -> dict:
 
 def index_rows(rows: list[dict], clips: list[dict]) -> dict[int, list]:
     """Saved records -> {clip index: words}, matched on (path, start)."""
-    by_key = {(r["path"], round(float(r["start"]), 3)): r["words"] for r in rows}
+    by_key = {clip_key(r): r["words"] for r in rows}
     out = {}
     for index, clip in enumerate(clips):
-        hit = by_key.get((clip["path"], round(clip["start"], 3)))
+        hit = by_key.get(clip_key(clip))
         if hit:
             out[index] = hit
     return out
@@ -692,10 +698,10 @@ def load_saved(path: Path, clips: list[dict]) -> dict[int, list]:
             row = json.loads(line)
         except json.JSONDecodeError:
             continue
-        by_key[(row["path"], round(float(row["start"]), 3))] = row["words"]
+        by_key[clip_key(row)] = row["words"]
     out = {}
     for index, clip in enumerate(clips):
-        hit = by_key.get((clip["path"], round(clip["start"], 3)))
+        hit = by_key.get(clip_key(clip))
         if hit:
             out[index] = hit
     return out
