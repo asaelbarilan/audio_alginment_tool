@@ -2,3 +2,4 @@ data/
 ~data/gold_set/*.jsonl
 .venv/
 __pycache__/
+.env
