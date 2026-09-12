@@ -28,6 +28,16 @@
  #gate button{margin-top:12px;width:100%;font:600 14px system-ui,sans-serif;padding:9px;
               border:0;border-radius:6px;background:#3d6fd6;color:#fff;cursor:pointer}
  #whoerr{color:#e06c6c;font-size:12px;min-height:16px;margin-top:8px}
+ #mgate{position:fixed;inset:0;background:#14161a;display:none;align-items:center;
+        justify-content:center;z-index:60}
+ #mgate.on{display:flex}
+ #mgate .card{background:#1c1f25;border-radius:10px;padding:26px 28px;max-width:460px}
+ #mgate h2{font-size:16px;margin:0 0 10px}
+ #mgate p{color:#8a8f98;line-height:1.5;margin:0 0 16px}
+ #mgate button{margin-top:12px;width:100%;font:600 14px system-ui,sans-serif;padding:9px;
+               border:0;border-radius:6px;background:#2b6b46;color:#fff;cursor:pointer}
+ #mgate button:disabled{opacity:.5;cursor:default}
+ #migerr{color:#e06c6c;font-size:12px;min-height:16px;margin-top:8px}
  #me{color:#6f757f;font-size:12px;margin-left:auto}
  #ov{display:block;width:100%;height:90px;background:#1c1f25;border-radius:6px;cursor:pointer}
  #zm{display:block;width:100%;height:220px;background:#1c1f25;border-radius:6px;cursor:grab}
@@ -47,11 +57,14 @@
  select{background:#2a2e37;color:#e8e8ea;border:1px solid #3a3f4a;border-radius:6px;padding:6px}
  .sep{width:1px;height:26px;background:#333844;margin:0 4px}
  .tag{color:#6f757f;font-size:12px;margin-right:2px}
+  .chk{color:#8a8f98;font-size:12px;margin-left:auto;display:flex;align-items:center;gap:6px;cursor:pointer}
+  .chk input{accent-color:#3d6fd6;cursor:pointer}
  #clock{color:#c8ccd4;font-variant-numeric:tabular-nums;margin-left:auto;font-size:13px}
  #words{margin:10px 0;direction:rtl;text-align:right;line-height:2.3;font-size:16px}
  .w{padding:3px 9px;margin:0 2px;border-radius:5px;background:#252932;cursor:pointer}
  .w.cur{background:#3d6fd6;color:#fff;font-weight:600}
  .w.ok{background:#24503a;color:#bfe6cf}
+ .w.playing{border:2px solid #d8a13a}
  #cmp{margin:6px 0;font-variant-numeric:tabular-nums;font-size:13px}
  .pill{display:inline-block;padding:3px 10px;margin-right:8px;border-radius:5px;background:#252932}
  #hint{color:#767c86;margin-top:10px;line-height:1.9;font-size:12.5px}
@@ -68,6 +81,15 @@
     <button id="whogo" type="submit">Start marking</button>
   </form>
   <div id="whoerr"></div>
+</div></div>
+<div id="mgate"><div class="card">
+  <h2>Database needs migration</h2>
+  <p id="migtext">This build stores each fix as its own row, but your marks table still uses
+     the old one-blob-per-annotator layout. Until it is migrated the server refuses to serve
+     work, so nobody can save on top of somebody else's record. Clicking below rewrites your
+     existing marks into the new format &mdash; nothing is deleted &mdash; then reload the page.</p>
+  <button id="miggo">Migrate database</button>
+  <div id="migerr"></div>
 </div></div>
 <div class="top"><h1>Hebrew alignment tagging</h1><div id="bar"></div><div id="me"></div></div>
 
@@ -116,12 +138,14 @@
   <div class="sep"></div>
   <button id="addw">+ add word after</button>
   <button id="delw" class="danger">&times; delete word</button>
+  <label class="chk"><input type="checkbox" id="playMark" checked> play word on mark change</label>
 </div>
 <div class="row">
   <span class="tag">move</span>
   <button id="fit">fit word</button><button id="fitall">fit all words</button><button id="prevw">&larr; prev word</button><button id="nextw">next word &rarr;</button>
   <div class="sep"></div>
   <button id="prevc">&larr; prev clip</button>
+  <button id="saveonly">save</button>
   <button id="save" class="go">save &amp; next clip</button>
   <button id="skip">skip clip</button>
   <div class="sep"></div>
@@ -131,9 +155,11 @@
 <div id="hint">
 <kbd>space</kbd> play / pause &nbsp; <kbd>esc</kbd> stop &nbsp; <kbd>q</kbd> hear up to the mark &nbsp;
 <kbd>w</kbd> the word &nbsp; <kbd>e</kbd> hear after the mark &nbsp;
-<kbd>&larr;</kbd><kbd>&rarr;</kbd> change word &nbsp; <kbd>tab</kbd> switch start/end &nbsp;
+<kbd>&larr;</kbd><kbd>&rarr;</kbd> move through marks &nbsp; <kbd>tab</kbd> next word (start) &middot; <kbd>shift+tab</kbd> prev word (end) &nbsp;
 <kbd>f</kbd> put mark at playhead &nbsp;
-<kbd>l</kbd> loop across the mark &nbsp; <kbd>shift+l</kbd> loop the word &nbsp; <kbd>shift</kbd>+<kbd>&larr;</kbd><kbd>&rarr;</kbd> nudge mark 25ms &nbsp; <kbd>,</kbd><kbd>.</kbd> nudge 10ms &nbsp; <kbd>enter</kbd> save &amp; next
+<kbd>l</kbd> loop across the mark &nbsp; <kbd>shift+l</kbd> loop the word &nbsp;
+<kbd>shift</kbd>+<kbd>&larr;</kbd><kbd>&rarr;</kbd> nudge 25ms &middot; <kbd>shift</kbd>+<kbd>&uarr;</kbd><kbd>&darr;</kbd> nudge 125ms &nbsp;
+<kbd>,</kbd><kbd>.</kbd> nudge 10ms &nbsp; <kbd>enter</kbd> save &middot; <kbd>ctrl+enter</kbd> save &amp; next &middot; <kbd>ctrl+s</kbd> save
 <br><b>Wrong word?</b> Double-click it to retype, or clear the box to delete it. Use
 <b>+ add word after</b> for one the transcript missed.<br>
 <b>Corrected words</b> are outlined amber, <b>added</b> ones green. Double-click to retype. The original is kept, and the word is outlined in amber.<br>
@@ -170,6 +196,7 @@ let ME=null;
 
 async function boot(){
   ME=await (await fetch(api('/api/me'))).json();
+  if(ME.migrate) return showMigrate();
   if(ME.auth){
     if(!ME.logged_in) return signIn();
     // Signed in but no annotator name yet. The marks made before sign-in existed are filed
@@ -198,6 +225,23 @@ function signIn(){
     +'your name, and you keep the same work across devices.';
   const b=$('gsignin'); b.hidden=false;
   b.onclick=()=>{ location.href=ME.login_url; };
+}
+
+function showMigrate(){
+  const g=$('mgate'); g.classList.add('on');
+  $('miggo').onclick=async ()=>{
+    const b=$('miggo'); b.disabled=true; $('migerr').textContent='';
+    try{
+      const r=await fetch(api('/api/migrate'),{method:'POST'});
+      const j=await r.json().catch(()=>({}));
+      if(!r.ok){ $('migerr').textContent=j.error||('Migration failed ('+r.status+')');
+        b.disabled=false; return; }
+      $('migtext').textContent='Migration complete. Your marks were rewritten in place. '
+        +'Reload to start marking.';
+      b.textContent='Reload'; b.disabled=false;
+      b.onclick=()=>location.reload();
+    }catch(err){ $('migerr').textContent='Migration failed: '+err; b.disabled=false; }
+  };
 }
 
 function gate(authed){
@@ -255,6 +299,27 @@ const total=()=>buf?buf.duration-lead:0;
 // true word start can genuinely lie before it. Everything drawn is now reachable.
 const tmin=()=>-lead;
 const mark=()=>edge==='end'?gold[wi].end:gold[wi].start;
+// Whether a word actually differs from what the source clip carried. Compared against the
+// original aligner values rather than a "was touched" flag, so a mark dragged and dragged
+// back reads as unmodified again, and a saved clip only shows green where it really moved.
+const srcWord=i=>{const s=clips[ci].a;return (s&&s[i])||null;};
+const modified=i=>{
+  const w=gold[i];
+  if(w.added) return true;
+  if(w.was!==undefined && w.was!==w.word) return true;
+  const s=srcWord(i);
+  if(!s) return true;
+  return Math.abs(w.start-s.start)>0.0005||Math.abs(w.end-s.end)>0.0005;
+};
+// Debounced "play the word whose mark just moved". Repeated nudges (shift+arrows, drag,
+// +-10ms) each touch the mark, so the word only plays once the marks settle -- a pause in
+// the motion means "done moving, now hear it".
+let playOnMark=true, markPlayTimer=null;
+function scheduleWordPlay(){
+  clearTimeout(markPlayTimer);
+  if(!playOnMark||loopKind) return;
+  markPlayTimer=setTimeout(()=>{ if(playOnMark&&gold.length) playWord(); },250);
+}
 
 // ---- transport -----------------------------------------------------------
 // Playback runs on the Web Audio clock, not on an <audio> element.
@@ -393,7 +458,7 @@ function drawOverview(){
   for(let x=0;x<w;x++){const lo=peaks[x*2],hi=peaks[x*2+1];
     og.fillRect(x,h/2+lo*h/2.2,1,Math.max(1,(hi-lo)*h/2.2));}
   gold.forEach((wd,i)=>{ og.fillStyle=(i===wi)?'#6aa0ff':'#48505e'; og.fillRect(X(wd.end),0,1,h); });
-  og.fillStyle='#ff5f56'; og.fillRect(X(now()),0,2,h);
+  og.fillStyle='#ff5f56'; og.fillRect(X(now()),h*.15,2,h*.7);
 }
 // the zoom window always contains the WHOLE current word, so start and end are both reachable
 // The zoom window is explicit state, not a function of the word, so it can be dragged and
@@ -438,7 +503,7 @@ function drawZoom(){
   // every word's span, so the whole sentence is visible at once; the current one brighter
   gold.forEach((wd,i)=>{
     zg.fillStyle=(i===wi)?'rgba(61,111,214,.18)'
-      : touched.has(i)?'rgba(78,201,138,.07)':'rgba(255,255,255,.035)';
+      : modified(i)?'rgba(78,201,138,.07)':'rgba(255,255,255,.035)';
     zg.fillRect(X(wd.start),0,Math.max(1,X(wd.end)-X(wd.start)),h);
   });
   const d=buf.getChannelData(0),sr=buf.sampleRate;
@@ -472,7 +537,7 @@ function drawZoom(){
   zg.font='bold 11px system-ui'; zg.fillStyle='#cfe0ff';
   zg.fillText(edge.toUpperCase(),X(edge==='end'?gold[wi].end:gold[wi].start)
     +(edge==='start'?6:-34),h-16);
-  const p=now(); if(p>=lo&&p<=hi){ zg.fillStyle='#ff5f56'; zg.fillRect(X(p),0,2,h); }
+  const p=now(); if(p>=lo&&p<=hi){ zg.fillStyle='#ff5f56'; zg.fillRect(X(p),h*.15,2,h*.7); }
   $('zlab').firstChild.textContent='current word "'+gold[wi].word+'"  —  editing the '
     +edge.toUpperCase()+'   (ticks 100 ms)   ';
 }
@@ -483,8 +548,18 @@ function drawScroll(){
   th.style.width=Math.max(2,(b-a)/span*100)+'%';
 }
 function draw(){ drawOverview(); drawZoom(); drawScroll(); }
+let playingIdx=-1;
+function updatePlayingChip(){
+  const p=now(); let idx=-1;
+  if(playing){ for(let i=0;i<gold.length;i++) if(p>=gold[i].start&&p<=gold[i].end){idx=i;break;} }
+  if(idx===playingIdx) return;
+  if(playingIdx>=0&&chips[playingIdx]) chips[playingIdx].classList.remove('playing');
+  playingIdx=idx;
+  if(idx>=0&&chips[idx]) chips[idx].classList.add('playing');
+}
 function tick(){ if(playing)draw();
-  $('clock').textContent=mmss(now())+' / '+mmss(total()); requestAnimationFrame(tick); }
+  $('clock').textContent=mmss(now())+' / '+mmss(total()); updatePlayingChip();
+  requestAnimationFrame(tick); }
 
 // The chips are built once and then only updated. They used to be recreated on every
 // render, which silently broke double-click: the first click of the gesture calls render,
@@ -492,11 +567,11 @@ function tick(){ if(playing)draw();
 // different element, so the browser never reports a double-click at all.
 let chips=[];
 function buildWords(){
-  const ws=$('words'); ws.innerHTML=''; chips=[];
+  const ws=$('words'); ws.innerHTML=''; chips=[]; playingIdx=-1;
   gold.forEach((wd,i)=>{
     const s=document.createElement('span');
     s.title='double-click to correct the word';
-    s.onclick=()=>{wi=i;draw();render();playWord();};
+    s.onclick=()=>{wi=i;fitWord();draw();render();playWord();};
     s.ondblclick=e=>{e.stopPropagation();editWord(i,s);};
     ws.appendChild(s); chips.push(s);
   });
@@ -509,7 +584,7 @@ function render(){
   if(chips.length!==gold.length || !chips.every(c=>c.parentNode)) buildWords();
   gold.forEach((wd,i)=>{const s=chips[i];
     s.textContent=wd.word;
-    s.className='w'+(i===wi?' cur':(touched.has(i)?' ok':''))
+    s.className='w'+(i===wi?' cur':(modified(i)?' ok':''))
       +((wd.was!==undefined && wd.was!==wd.word)?' fixed':'')
       +(wd.added?' added':'');});
   const me=gold[wi];
@@ -612,9 +687,26 @@ function setMark(t,which){
   touched.add(wi); ensureVisible(which==='start'?gold[wi].start:gold[wi].end);
   draw(); render();
   if(loopKind){ const sp=loopSpan(); start(sp[0],sp[1]); }
+  else scheduleWordPlay();
 }
-const goWord=i=>{ wi=Math.max(0,Math.min(i,gold.length-1)); fitWord(); draw(); render();
-  if(loopKind){const sp=loopSpan(); start(sp[0],sp[1]);} else playWord(); };
+const goWord=i=>{ const old=wi; wi=Math.max(0,Math.min(i,gold.length-1));
+  if(wi>old) edge='start'; else if(wi<old) edge='end';
+  fitWord(); draw(); render();
+  if(loopKind){const sp=loopSpan(); start(sp[0],sp[1]);}
+  else playWord();
+};
+const stepMark=dir=>{
+  if(dir>0){
+    if(edge==='start') edge='end';
+    else if(wi<gold.length-1){wi++;edge='start';}
+  }else{
+    if(edge==='end') edge='start';
+    else if(wi>0){wi--;edge='end';}
+  }
+  fitWord(); draw(); render();
+  if(loopKind){const sp=loopSpan(); start(sp[0],sp[1]);}
+  else playWord();
+};
 
 // ---- pointer -------------------------------------------------------------
 ov.onmousedown=e=>{
@@ -635,7 +727,10 @@ zm.onmousedown=e=>{
   // The playhead is grabbable too, and checked first. In this panel a drag already means
   // "slide the word" inside a span and "pan the view" outside one, so without an explicit
   // handle the playhead could only be clicked, never dragged -- which reads as broken.
-  if(Math.abs(px(now())-e.clientX)<9){
+  // It renders only in the middle 70% of the panel, so when it sits on top of a word's
+  // mark the user aims at the bare strip above or below it to grab the mark instead.
+  const inBand=e.clientY>r.top+r.height*0.15 && e.clientY<r.bottom-r.height*0.15;
+  if(Math.abs(px(now())-e.clientX)<9 && inBand){
     zm.classList.add('grabbing');
     const mv=ev=>moveHead(at(ev.clientX));
     const up=()=>{zm.classList.remove('grabbing');
@@ -669,6 +764,7 @@ zm.onmousedown=e=>{
         a=Math.max(lo,Math.min(a,hi-len));
         w.start=a; w.end=a+len; touched.add(wi); draw(); render();
         if(loopKind){const sp=loopSpan(); start(sp[0],sp[1]);}
+        else scheduleWordPlay();
       };
       const up=()=>{ if(!moved) moveHead(t);
         dragging=false; zm.classList.remove('grabbing');
@@ -767,6 +863,10 @@ $('rate').onchange=e=>{
 };
 $('edStart').onclick=()=>{edge='start';draw();render();};
 $('edEnd').onclick=()=>{edge='end';draw();render();};
+$('playMark').checked=localStorage.getItem('tagPlayMark')!=='0';
+playOnMark=$('playMark').checked;
+$('playMark').onchange=e=>{playOnMark=e.target.checked;
+  localStorage.setItem('tagPlayMark',playOnMark?'1':'0');};
 $('setb').onclick=()=>setMark(now());
 $('m10').onclick=()=>setMark(mark()-.01); $('p10').onclick=()=>setMark(mark()+.01);
 $('fit').onclick=()=>{fitWord();draw();};
@@ -775,6 +875,7 @@ $('fitall').onclick=()=>{view=[Math.max(tmin(),gold[0].start-0.2),
 $('addw').onclick=addWord; $('delw').onclick=delWord;
 $('prevw').onclick=()=>goWord(wi-1); $('nextw').onclick=()=>goWord(wi+1);
 $('prevc').onclick=()=>{if(ci>0){ci--;loadClip();}};
+$('saveonly').onclick=save;
 $('save').onclick=saveNext;
 $('skip').onclick=()=>{if(ci<clips.length-1){ci++;loadClip();}};
 
@@ -799,10 +900,10 @@ addEventListener('keydown',async e=>{
   // name is also a shortcut here, so the name box would play, seek and re-mark as it
   // was filled in.
   if(/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)||e.target.isContentEditable)return;
-  if($('gate').classList.contains('on'))return;
+  if($('gate').classList.contains('on')||$('mgate').classList.contains('on'))return;
   if(e.code==='Space'){e.preventDefault();toggle();return;}
   if(e.key==='Escape'){loopKind=null;$('loopWord').classList.remove('on');$('loopMark').classList.remove('on');stop();head=0;seg=null;draw();return;}
-  if(e.key==='Tab'){e.preventDefault();edge=(edge==='end')?'start':'end';draw();render();return;}
+  if(e.key==='Tab'){e.preventDefault();(e.shiftKey?goWord(wi-1):goWord(wi+1));return;}
   if(e.key==='q'){playBefore();return;}
   if(e.key==='w'){playWord();return;}
   if(e.key==='e'){playAfter();return;}
@@ -813,15 +914,19 @@ addEventListener('keydown',async e=>{
   // touching the mouse: tab switches start/end, q/w/e play around it, shift+arrows move it.
   if(e.key==='ArrowLeft'&&e.shiftKey){e.preventDefault();setMark(mark()-.025);return;}
   if(e.key==='ArrowRight'&&e.shiftKey){e.preventDefault();setMark(mark()+.025);return;}
-  if(e.key==='ArrowLeft'){e.preventDefault();goWord(wi-1);return;}
-  if(e.key==='ArrowRight'){e.preventDefault();goWord(wi+1);return;}
+  if(e.key==='ArrowDown'&&e.shiftKey){e.preventDefault();setMark(mark()-.125);return;}
+  if(e.key==='ArrowUp'&&e.shiftKey){e.preventDefault();setMark(mark()+.125);return;}
+  if(e.key==='ArrowLeft'){e.preventDefault();stepMark(-1);return;}
+  if(e.key==='ArrowRight'){e.preventDefault();stepMark(1);return;}
   if(e.key==='f'){setMark(now());return;}
   if(e.key===','){setMark(mark()-.01);return;}
   if(e.key==='.'){setMark(mark()+.01);return;}
   if(e.key==='<'){setMark(mark()-.002);return;}
   if(e.key==='>'){setMark(mark()+.002);return;}
-  if(e.key==='Enter'){await saveNext();return;}
-  if(e.key==='s'){if(ci<clips.length-1){ci++;await loadClip();}return;}
+  if(e.key==='Enter'){e.preventDefault();
+    if(e.ctrlKey||e.metaKey) await saveNext(); else await save(); return;}
+  if(e.key==='s'){if(e.ctrlKey||e.metaKey){e.preventDefault();await save();return;}
+    if(ci<clips.length-1){ci++;await loadClip();}return;}
 });
 addEventListener('resize',()=>{peaks=null;draw();});
 boot();

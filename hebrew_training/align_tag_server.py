@@ -419,13 +419,8 @@ class PostgresStore:
 
         self.psycopg = psycopg
         self.url = url
+        self.pending_migration = False
         with self.connect() as conn:
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS marks ("
-                "  annotator TEXT PRIMARY KEY,"
-                "  payload   JSONB NOT NULL,"
-                "  updated_at TIMESTAMPTZ NOT NULL DEFAULT now())"
-            )
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS identities ("
                 "  sub     TEXT PRIMARY KEY,"
@@ -440,16 +435,36 @@ class PostgresStore:
                 "  claimed_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
                 "  done       BOOLEAN NOT NULL DEFAULT false)"
             )
+            # marks: one row per (annotator, clip), so a save only rewrites the clip that
+            # changed. A pre-existing table without the clip_key column is the old
+            # schema (one JSONB blob per annotator) and is served read-only until a user
+            # confirms the migration -- see migrate().
+            if conn.execute("SELECT to_regclass('marks')").fetchone()[0] is None:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS marks ("
+                    "  annotator  TEXT NOT NULL,"
+                    "  clip_key   TEXT NOT NULL,"
+                    "  payload    JSONB NOT NULL,"
+                    "  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
+                    "  PRIMARY KEY (annotator, clip_key))"
+                )
+            else:
+                column = conn.execute(
+                    "SELECT column_name FROM information_schema.columns"
+                    " WHERE table_name = 'marks' AND column_name = 'clip_key'"
+                ).fetchone()
+                if column is None:
+                    self.pending_migration = True
 
     def connect(self):
         return self.psycopg.connect(self.url, autocommit=True)
 
     def load(self, who: str, clips: list[dict]) -> dict[int, list]:
         with self.connect() as conn:
-            row = conn.execute("SELECT payload FROM marks WHERE annotator = %s", (who,)).fetchone()
-        if not row:
+            rows = conn.execute("SELECT payload FROM marks WHERE annotator = %s", (who,)).fetchall()
+        if not rows:
             return {}
-        return index_rows(row[0], clips)
+        return index_rows([r[0] for r in rows], clips)
 
     def claims(self) -> dict[str, tuple[str, float]]:
         with self.connect() as conn:
@@ -512,10 +527,46 @@ class PostgresStore:
             )
         return name
 
+    def migrate(self) -> None:
+        """Split the old one-blob-per-annotator marks into one row per clip.
+
+        Runs only after a user confirms on the page; the table is left untouched until then.
+        clip_key is rebuilt from each stored record's path/start with the same rules as
+        clip_key(), so the new rows line up with the claims table.
+        """
+        with self.connect() as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS marks_new ("
+                "  annotator  TEXT NOT NULL,"
+                "  clip_key   TEXT NOT NULL,"
+                "  payload    JSONB NOT NULL,"
+                "  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
+                "  PRIMARY KEY (annotator, clip_key))"
+            )
+            old = conn.execute(
+                "SELECT annotator, payload, updated_at FROM marks ORDER BY annotator"
+            ).fetchall()
+            for annotator, payload, updated_at in old:
+                rows = payload if isinstance(payload, list) else [payload]
+                for row in rows:
+                    name = str(row["path"]).replace("\\", "/").rsplit("/", 1)[-1]
+                    key = f"{name}@{round(float(row['start']), 3)}"
+                    conn.execute(
+                        "INSERT INTO marks_new (annotator, clip_key, payload, updated_at)"
+                        " VALUES (%s, %s, %s, %s)",
+                        (annotator, key, json.dumps(row, ensure_ascii=False), updated_at),
+                    )
+            conn.execute("DROP TABLE marks")
+            conn.execute("ALTER TABLE marks_new RENAME TO marks")
+        self.pending_migration = False
+
     def everything(self) -> list[tuple[str, list]]:
         """Every annotator's marks, for export."""
         with self.connect() as conn:
-            rows = conn.execute("SELECT annotator, payload FROM marks").fetchall()
+            rows = conn.execute(
+                "SELECT annotator, jsonb_agg(payload ORDER BY clip_key)"
+                "  FROM marks GROUP BY annotator"
+            ).fetchall()
         return [(r[0], r[1]) for r in rows]
 
     def progress(self) -> list[dict]:
@@ -523,9 +574,9 @@ class PostgresStore:
         otherwise no way to see that anyone has been working, or who."""
         with self.connect() as conn:
             marks = conn.execute(
-                "SELECT annotator, jsonb_array_length(payload),"
-                "       EXTRACT(EPOCH FROM updated_at)"
-                "  FROM marks"
+                "SELECT annotator, count(*),"
+                "       EXTRACT(EPOCH FROM max(updated_at))"
+                "  FROM marks GROUP BY annotator"
             ).fetchall()
             held = conn.execute(
                 "SELECT annotator, count(*) FROM claims WHERE done = false GROUP BY annotator"
@@ -546,15 +597,20 @@ class PostgresStore:
         return sorted(rows, key=lambda r: (r["last"] or 0), reverse=True)
 
     def save(self, who: str, clips: list[dict], saved: dict[int, list]) -> None:
-        payload = [gold_row(clips[i], saved[i]) for i in sorted(saved)]
+        """Upsert one row per saved clip, so a save touches only what changed."""
         with self.connect() as conn:
-            conn.execute(
-                "INSERT INTO marks (annotator, payload, updated_at)"
-                " VALUES (%s, %s, now())"
-                " ON CONFLICT (annotator) DO UPDATE"
-                "   SET payload = EXCLUDED.payload, updated_at = now()",
-                (who, json.dumps(payload, ensure_ascii=False)),
-            )
+            for index in sorted(saved):
+                conn.execute(
+                    "INSERT INTO marks (annotator, clip_key, payload, updated_at)"
+                    " VALUES (%s, %s, %s, now())"
+                    " ON CONFLICT (annotator, clip_key) DO UPDATE"
+                    "   SET payload = EXCLUDED.payload, updated_at = now()",
+                    (
+                        who,
+                        clip_key(clips[index]),
+                        json.dumps(gold_row(clips[index], saved[index]), ensure_ascii=False),
+                    ),
+                )
 
 
 class FileClaims:
@@ -766,6 +822,7 @@ def make_handler(args, clips, saved):
                 body = {
                     "auth": bool(args.auth),
                     "logged_in": bool(person),
+                    "migrate": bool(STORE is not None and STORE.pending_migration),
                     "login_url": "/xhost-auth/login?return_to=/",
                     "logout_url": "/xhost-auth/logout?return_to=/",
                 }
@@ -782,6 +839,11 @@ def make_handler(args, clips, saved):
                     json.dumps(body, ensure_ascii=False).encode("utf-8"),
                     "application/json; charset=utf-8",
                 )
+            if STORE is not None and STORE.pending_migration:
+                # The old marks schema is not writable. Nothing is lost by refusing:
+                # the page shows the migration gate, and until a user confirms there is
+                # no safe way to write a fix without overwriting another annotator's blob.
+                return self.send(503, b'{"error":"database migration required"}', "application/json")
             if args.auth and route.startswith("/api/") and route != "/api/progress":
                 if not self.signed_in():
                     return self.send(401, b'{"error":"sign in"}', "application/json")
@@ -944,6 +1006,18 @@ def make_handler(args, clips, saved):
                 return self.send(
                     200, json.dumps({"name": bound}).encode("utf-8"), "application/json"
                 )
+            if route == "/api/migrate":
+                # Confirmed by any user on the page. Until this runs the whole store is
+                # read-only, so there is no window where one blob is half-split.
+                if STORE is None or not STORE.pending_migration:
+                    return self.send(409, b'{"error":"no migration pending"}', "application/json")
+                try:
+                    STORE.migrate()
+                except Exception as exc:  # noqa: BLE001 -- surface whatever failed
+                    return self.send(500, json.dumps({"error": str(exc)}).encode(), "application/json")
+                return self.send(200, b'{"ok":true}', "application/json")
+            if STORE is not None and STORE.pending_migration:
+                return self.send(503, b'{"error":"database migration required"}', "application/json")
             if args.auth and not self.who():
                 return self.send(401, b'{"error":"sign in"}', "application/json")
             if route != "/api/gold":
