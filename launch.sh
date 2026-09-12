@@ -9,7 +9,9 @@ set -eu
 #
 # Marks go to Postgres via DATABASE_URL, so --out is only the fallback for a host
 # without a database.
-exec python -m hebrew_training.align_tag_server \
+# install.sh's uv sync built .venv on CPython 3.11; run from it so the pinned
+# interpreter and dependencies win, not whatever system python is default.
+exec .venv/bin/python -m hebrew_training.align_tag_server \
   --a data/gold_set/A_hebrew.jsonl \
   --b data/gold_set/B_mms.jsonl \
   --clips-s3 clips/ \

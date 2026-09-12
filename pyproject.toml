@@ -1,0 +1,20 @@
+[project]
+name = "hebrew-alignment-tagger"
+version = "0.1.0"
+description = "Browser tool for hand-marking Hebrew word boundaries against forced aligners"
+requires-python = ">=3.11"
+dependencies = [
+    "boto3==1.35.36",
+    "numpy==2.1.3",
+    "psycopg[binary]==3.2.3",
+    "pyjwt[crypto]==2.10.1",
+    "soundfile==0.12.1",
+]
+
+[dependency-groups]
+dev = [
+    "mypy",
+]
+
+[tool.uv]
+package = false
