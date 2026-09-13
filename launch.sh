@@ -14,7 +14,7 @@ set -eu
 exec .venv/bin/python -m hebrew_training.align_tag_server \
   ${DATASETS_BUCKET:+--datasets-bucket "$DATASETS_BUCKET"} \
   --datasets-folder data/datasets \
-  --dataset plenum \
+  --dataset "${DATASET:-plenum}" \
   --out /tmp/marks --multi --split --limit 134 \
   ${TAG_AUTH:+--auth "$TAG_AUTH"} \
   --host 0.0.0.0 --port "$XHOST_HTTP_PORT"
