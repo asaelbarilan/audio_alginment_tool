@@ -75,9 +75,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--dataset",
-        required=True,
+        default=os.environ.get("DATASET", ""),
         help="Which dataset to serve -- a top-level folder name under --datasets-folder / "
-        "--datasets-bucket.",
+        "--datasets-bucket. Falls back to the DATASET environment variable when the "
+        "--dataset arg is not given.",
     )
     parser.add_argument(
         "--out",
@@ -1162,6 +1163,10 @@ def main() -> None:
     args = parse_args()
     if not args.datasets_bucket and not args.datasets_folder:
         raise SystemExit("one of --datasets-folder or --datasets-bucket is required")
+    if not args.dataset:
+        raise SystemExit(
+            "--dataset is required (or set the DATASET environment variable)"
+        )
 
     database = os.environ.get("DATABASE_URL", "")
     if database:
