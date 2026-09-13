@@ -40,7 +40,8 @@
  #migerr{color:#e06c6c;font-size:12px;min-height:16px;margin-top:8px}
  #me{color:#6f757f;font-size:12px;margin-left:auto}
  #ov{display:block;width:100%;height:90px;background:#1c1f25;border-radius:6px;cursor:pointer}
- #zm{display:block;width:100%;height:220px;background:#1c1f25;border-radius:6px;cursor:grab}
+ #spec{display:block;width:100%;height:110px;background:#1c1f25;border-radius:6px;margin-bottom:3px;cursor:default}
+ #zm{display:block;width:100%;height:190px;background:#1c1f25;border-radius:6px;cursor:grab}
  #zm.grabbing{cursor:grabbing}
  #zm.onmark{cursor:ew-resize}
  #scroll{height:14px;background:#1c1f25;border-radius:0 0 6px 6px;position:relative;
@@ -95,8 +96,8 @@
 
 <div class="lab">whole clip &mdash; click or drag to move the playhead
   <span class="legend">
-    <span class="key"><i class="sw" style="background:#ff5f56"></i>playhead</span>
     <span class="key"><i class="sw" style="background:#6aa0ff"></i>your marks</span>
+    <span class="key"><i class="sw" style="background:#ff5f56"></i>playhead</span>
   </span></div>
 <canvas id="ov"></canvas>
 
@@ -105,6 +106,7 @@
     <span class="key"><i class="sw" style="background:#6aa0ff"></i>your marks</span>
     <span class="key"><i class="sw" style="background:#ff5f56"></i>playhead</span>
   </span></div>
+<canvas id="spec"></canvas>
 <canvas id="zm"></canvas>
 <div id="scroll"><div id="thumb"></div></div>
 
@@ -134,7 +136,7 @@
   <button id="edStart">word START</button><button id="edEnd" class="on">word END</button>
   <div class="sep"></div>
   <button id="setb">put mark at playhead</button>
-  <button id="m10">&minus;10ms</button><button id="p10">+10ms</button>
+  <button id="m10" title="Ctrl+Shift+←">&minus;10ms</button><button id="p10" title="Ctrl+Shift+→">+10ms</button>
   <div class="sep"></div>
   <button id="addw">+ add word after</button>
   <button id="delw" class="danger">&times; delete word</button>
@@ -158,8 +160,8 @@
 <kbd>&larr;</kbd><kbd>&rarr;</kbd> move through marks &nbsp; <kbd>tab</kbd> next word (start) &middot; <kbd>shift+tab</kbd> prev word (end) &nbsp;
 <kbd>f</kbd> put mark at playhead &nbsp;
 <kbd>l</kbd> loop across the mark &nbsp; <kbd>shift+l</kbd> loop the word &nbsp;
-<kbd>shift</kbd>+<kbd>&larr;</kbd><kbd>&rarr;</kbd> nudge 25ms &middot; <kbd>shift</kbd>+<kbd>&uarr;</kbd><kbd>&darr;</kbd> nudge 125ms &nbsp;
-<kbd>,</kbd><kbd>.</kbd> nudge 10ms &nbsp; <kbd>enter</kbd> save &middot; <kbd>ctrl+enter</kbd> save &amp; next &middot; <kbd>ctrl+s</kbd> save
+<kbd>ctrl</kbd>+<kbd>shift</kbd>+<kbd>&larr;</kbd><kbd>&rarr;</kbd> nudge 10ms &middot; <kbd>shift</kbd>+<kbd>&larr;</kbd><kbd>&rarr;</kbd> nudge 25ms &middot; <kbd>shift</kbd>+<kbd>&uarr;</kbd><kbd>&darr;</kbd> nudge 125ms &nbsp;
+<kbd>enter</kbd> save &middot; <kbd>ctrl+enter</kbd> save &amp; next &middot; <kbd>ctrl+s</kbd> save
 <br><b>Wrong word?</b> Double-click it to retype, or clear the box to delete it. Use
 <b>+ add word after</b> for one the transcript missed.<br>
 <b>Corrected words</b> are outlined amber, <b>added</b> ones green. Double-click to retype. The original is kept, and the word is outlined in amber.<br>
@@ -185,7 +187,9 @@ let buf=null,lead=0,ctx=null,peaks=null;
 let playing=false,head=0,loopKind=null,rate=1,seg=null;
 const MARGIN=0.35;                    // seconds of context shown either side of the word
 const ov=document.getElementById('ov'),og=ov.getContext('2d');
+const spec=document.getElementById('spec'),sg=spec.getContext('2d');
 const zm=document.getElementById('zm'),zg=zm.getContext('2d');
+let specCanvas=null;
 const $=id=>document.getElementById(id);
 const f3=t=>t.toFixed(3);
 const mmss=t=>{t=Math.max(0,t);return Math.floor(t/60)+':'+(t%60).toFixed(2).padStart(5,'0');};
@@ -286,10 +290,12 @@ async function loadClip(){
   gold=(c.saved||c.words).map(w=>({word:w.word,start:w.start,end:w.end}));
   touched=new Set(c.saved?gold.map((_,i)=>i):[]);
   wi=0; edge='end'; head=0;
+  specCanvas=null;
   const r=await fetch(api('/api/audio/'+ci)); lead=parseFloat(r.headers.get('X-Lead')||'0');
   const ab=await r.arrayBuffer();
   ctx=ctx||new (window.AudioContext||window.webkitAudioContext)();
   buf=await ctx.decodeAudioData(ab);
+  specCanvas=buildMelSpec(buf);
   peaks=null; view=null; stretchCache.clear(); draw(); render();
 }
 const total=()=>buf?buf.duration-lead:0;
@@ -466,10 +472,11 @@ function drawOverview(){
 // ensureVisible when a mark is dragged past its edge.
 let view=null,dragging=false;
 function fitWord(){
+  if(!gold||!gold.length||!gold[wi]){ view=[tmin(), Math.max(tmin()+0.12, total())]; return; }
   view=[Math.max(tmin(),gold[wi].start-MARGIN), Math.min(total(),gold[wi].end+MARGIN)];
   if(view[1]-view[0]<0.12) view[1]=view[0]+0.12;
 }
-function zwin(){ if(!view) fitWord(); return view; }
+function zwin(){ if(!view) fitWord(); return view || [tmin(), Math.max(tmin()+0.12, total())]; }
 function panBy(dt){
   const [lo,hi]=view, span=hi-lo;
   let a=lo+dt, b=hi+dt;
@@ -495,8 +502,263 @@ function ensureVisible(t){
   const [lo,hi]=view, pad=(hi-lo)*0.12;
   if(t<lo+pad) panBy(t-(lo+pad)); else if(t>hi-pad) panBy(t-(hi-pad));
 }
+// ---- mel spectrogram (0-5000 Hz) -------------------------------------------
+const SPEC_PALETTE = [
+  { p: 0.0,  r: 20,  g: 22,  b: 26 },   // matches app background #14161a
+  { p: 0.15, r: 35,  g: 30,  b: 65 },   // deep navy purple
+  { p: 0.35, r: 75,  g: 25,  b: 105 },  // rich violet
+  { p: 0.55, r: 165, g: 35,  b: 65 },   // vibrant magenta/crimson
+  { p: 0.75, r: 230, g: 95,  b: 30 },   // bright orange
+  { p: 0.90, r: 250, g: 200, b: 60 },   // bright warm yellow
+  { p: 1.0,  r: 255, g: 255, b: 240 }   // white/pale yellow
+];
+const SPEC_CMAP = new Uint8Array(256 * 3);
+for (let i = 0; i < 256; i++) {
+  const t = i / 255;
+  let idx = 0;
+  while (idx < SPEC_PALETTE.length - 1 && SPEC_PALETTE[idx + 1].p < t) idx++;
+  const c0 = SPEC_PALETTE[idx];
+  const c1 = SPEC_PALETTE[Math.min(idx + 1, SPEC_PALETTE.length - 1)];
+  const frac = c1.p === c0.p ? 0 : (t - c0.p) / (c1.p - c0.p);
+  SPEC_CMAP[i * 3]     = Math.round(c0.r + frac * (c1.r - c0.r));
+  SPEC_CMAP[i * 3 + 1] = Math.round(c0.g + frac * (c1.g - c0.g));
+  SPEC_CMAP[i * 3 + 2] = Math.round(c0.b + frac * (c1.b - c0.b));
+}
+
+const hzToMel = hz => 2595 * Math.log10(1 + hz / 700);
+const melToHz = mel => 700 * (Math.pow(10, mel / 2595) - 1);
+function freqToY(hz, height, maxHz) {
+  const m = hzToMel(Math.min(hz, maxHz));
+  const maxM = hzToMel(maxHz);
+  const frac = maxM > 0 ? m / maxM : 0;
+  return height * (1 - frac);
+}
+
+function runFft(re, im) {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      let tr = re[i]; re[i] = re[j]; re[j] = tr;
+      let ti = im[i]; im[i] = im[j]; im[j] = ti;
+    }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const half = len >> 1;
+    const ang = -2 * Math.PI / len;
+    const wstepR = Math.cos(ang), wstepI = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let wr = 1, wi = 0;
+      for (let j = 0; j < half; j++) {
+        const tr = wr * re[i + j + half] - wi * im[i + j + half];
+        const ti = wr * im[i + j + half] + wi * re[i + j + half];
+        re[i + j + half] = re[i + j] - tr;
+        im[i + j + half] = im[i + j] - ti;
+        re[i + j] += tr;
+        im[i + j] += ti;
+        const nextWr = wr * wstepR - wi * wstepI;
+        wi = wr * wstepI + wi * wstepR;
+        wr = nextWr;
+      }
+    }
+  }
+}
+
+function buildMelSpec(audioBuffer) {
+  if (!audioBuffer) return null;
+  const sr = audioBuffer.sampleRate;
+  const inp = audioBuffer.getChannelData(0);
+  const totalSamples = inp.length;
+  if (!totalSamples) return null;
+
+  // Pre-emphasis filter: boosts higher speech formants and bursts
+  const pre = new Float32Array(totalSamples);
+  pre[0] = inp[0];
+  for (let i = 1; i < totalSamples; i++) pre[i] = inp[i] - 0.97 * inp[i - 1];
+
+  const nFft = sr <= 24000 ? 512 : 1024;
+  const hop = Math.max(1, Math.round(sr * 0.005)); // 5ms hop for speech precision
+  const numBands = 80;
+  const maxHz = Math.min(5000, sr / 2);
+  const minHz = 0;
+  const maxBin = nFft >> 1;
+  const pad = nFft >> 1;
+  const numFrames = Math.floor(totalSamples / hop) + 1;
+
+  // Periodic Hann window
+  const win = new Float32Array(nFft);
+  for (let i = 0; i < nFft; i++) win[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / nFft);
+
+  // Mel filterbank
+  const minMel = hzToMel(minHz);
+  const maxMel = hzToMel(maxHz);
+  const melStep = (maxMel - minMel) / (numBands + 1);
+  const binPoints = new Float32Array(numBands + 2);
+  for (let i = 0; i < numBands + 2; i++) {
+    binPoints[i] = (melToHz(minMel + i * melStep) * nFft) / sr;
+  }
+  const filters = [];
+  for (let m = 0; m < numBands; m++) {
+    const center = binPoints[m + 1], left = binPoints[m], right = binPoints[m + 2];
+    const kMin = Math.max(0, Math.floor(left)), kMax = Math.min(maxBin - 1, Math.ceil(right));
+    const weights = [];
+    for (let k = kMin; k <= kMax; k++) {
+      let w = 0;
+      if (k >= left && k <= center && center > left) w = (k - left) / (center - left);
+      else if (k > center && k <= right && right > center) w = (right - k) / (right - center);
+      if (w > 0) weights.push({ bin: k, w });
+    }
+    if (weights.length === 0) {
+      weights.push({ bin: Math.max(0, Math.min(maxBin - 1, Math.round(center))), w: 1.0 });
+    }
+    filters.push(weights);
+  }
+
+  const re = new Float32Array(nFft);
+  const im = new Float32Array(nFft);
+  const power = new Float32Array(maxBin);
+  const melSpec = new Float32Array(numFrames * numBands);
+  let maxVal = -Infinity;
+
+  for (let f = 0; f < numFrames; f++) {
+    const centerSample = f * hop;
+    const startSample = centerSample - pad;
+    for (let i = 0; i < nFft; i++) {
+      const s = startSample + i;
+      re[i] = (s >= 0 && s < totalSamples ? pre[s] : 0) * win[i];
+      im[i] = 0;
+    }
+    runFft(re, im);
+    for (let k = 0; k < maxBin; k++) {
+      power[k] = re[k] * re[k] + im[k] * im[k];
+    }
+    for (let m = 0; m < numBands; m++) {
+      let sum = 0;
+      const flt = filters[m];
+      for (let j = 0; j < flt.length; j++) {
+        sum += power[flt[j].bin] * flt[j].w;
+      }
+      const val = Math.log10(sum + 1e-7);
+      melSpec[f * numBands + m] = val;
+      if (val > maxVal) maxVal = val;
+    }
+  }
+
+  const dynRange = 4.5; // 45 dB dynamic range
+  const minVal = maxVal - dynRange;
+
+  const offscreen = document.createElement('canvas');
+  offscreen.width = numFrames;
+  offscreen.height = numBands;
+  offscreen.maxHz = maxHz;
+  const offCtx = offscreen.getContext('2d');
+  const imgData = offCtx.createImageData(numFrames, numBands);
+  const data = imgData.data;
+
+  for (let f = 0; f < numFrames; f++) {
+    for (let m = 0; m < numBands; m++) {
+      const val = melSpec[f * numBands + m];
+      const norm = Math.max(0, Math.min(1, (val - minVal) / dynRange));
+      const ci = Math.min(255, Math.floor(norm * 255));
+      const y = numBands - 1 - m; // 0Hz at bottom, 5000Hz at top
+      const pIdx = (y * numFrames + f) * 4;
+      data[pIdx]     = SPEC_CMAP[ci * 3];
+      data[pIdx + 1] = SPEC_CMAP[ci * 3 + 1];
+      data[pIdx + 2] = SPEC_CMAP[ci * 3 + 2];
+      data[pIdx + 3] = 255;
+    }
+  }
+  offCtx.putImageData(imgData, 0, 0);
+  return offscreen;
+}
+
+function drawSpec(){
+  const w=spec.clientWidth||800, h=spec.clientHeight||110;
+  spec.width=w*devicePixelRatio; spec.height=h*devicePixelRatio;
+  sg.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+  sg.clearRect(0,0,w,h);
+  if(!buf||!specCanvas) return;
+  const [lo,hi]=zwin(), X=t=>(t-lo)/(hi-lo)*w;
+  const dur=buf.duration;
+  const maxHz=specCanvas.maxHz||5000;
+  const numFrames=specCanvas.width;
+  const maxF=Math.max(1,numFrames-1);
+
+  const tStart=Math.max(-lead,lo), tEnd=Math.min(dur-lead,hi);
+  if(tEnd>tStart){
+    const sx0=((tStart+lead)/dur)*maxF;
+    const sx1=((tEnd+lead)/dur)*maxF;
+    const dx0=X(tStart);
+    const dx1=X(tEnd);
+    sg.imageSmoothingEnabled=true;
+    sg.drawImage(specCanvas,sx0,0,Math.max(0.001,sx1-sx0),specCanvas.height,
+                 dx0,0,Math.max(0.001,dx1-dx0),h);
+  }
+
+  // current word highlight
+  gold.forEach((wd,i)=>{
+    if(i===wi){
+      sg.fillStyle='rgba(61,111,214,.18)';
+      sg.fillRect(X(wd.start),0,Math.max(1,X(wd.end)-X(wd.start)),h);
+    }
+  });
+
+  // word marks
+  gold.forEach((wd,i)=>{
+    const cur=(i===wi);
+    [['start',wd.start],['end',wd.end]].forEach(([which,t])=>{
+      if(X(t)<-4||X(t)>w+4) return;
+      const on=cur&&which===edge;
+      sg.fillStyle=cur?'#6aa0ff':'#4a5872';
+      sg.fillRect(X(t)-(on?2:0),0,on?4:(cur?2:1),h);
+    });
+  });
+
+  // playhead
+  const p=now();
+  if(p>=lo&&p<=hi){
+    sg.fillStyle='#ff5f56';
+    sg.fillRect(X(p),0,2,h);
+  }
+
+  // frequency grid lines
+  const guideFreqs = maxHz >= 4500 ? [3000, 2000, 1000, 500] : [maxHz * 0.75, maxHz * 0.5, maxHz * 0.25];
+  sg.setLineDash([2,4]);
+  sg.strokeStyle='rgba(255,255,255,0.14)';
+  sg.lineWidth=1;
+  guideFreqs.forEach(f => {
+    const y = freqToY(f, h, maxHz);
+    sg.beginPath(); sg.moveTo(28, y); sg.lineTo(w, y); sg.stroke();
+  });
+  sg.setLineDash([]);
+
+  // frequency labels
+  sg.font='9px system-ui,sans-serif';
+  sg.fillStyle='rgba(255,255,255,0.7)';
+  sg.shadowColor='rgba(0,0,0,0.85)';
+  sg.shadowBlur=3;
+  guideFreqs.forEach(f => {
+    const y = freqToY(f, h, maxHz);
+    const lbl = f >= 1000 ? (f / 1000) + 'k' : f + '';
+    sg.fillText(lbl, 3, y + 3);
+  });
+  sg.fillText((maxHz / 1000).toFixed(maxHz % 1000 ? 1 : 0) + ' kHz', 3, 10);
+  sg.fillText('0 Hz', 3, h - 3);
+
+  // Top-right indicator
+  sg.textAlign='right';
+  sg.font='10px system-ui,sans-serif';
+  sg.fillStyle='rgba(255,255,255,0.55)';
+  sg.fillText('0–' + Math.round(maxHz) + ' Hz mel-spec', w - 8, 12);
+  sg.textAlign='left';
+  sg.shadowColor='transparent';
+  sg.shadowBlur=0;
+}
+
 function drawZoom(){
-  const w=zm.clientWidth,h=220; zm.width=w*devicePixelRatio; zm.height=h*devicePixelRatio;
+  const w=zm.clientWidth||800,h=zm.clientHeight||190; zm.width=w*devicePixelRatio; zm.height=h*devicePixelRatio;
   zg.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0); zg.clearRect(0,0,w,h);
   if(!buf)return;
   const [lo,hi]=zwin(), X=t=>(t-lo)/(hi-lo)*w;
@@ -547,7 +809,7 @@ function drawScroll(){
   th.style.left=((a-lo)/span*100)+'%';
   th.style.width=Math.max(2,(b-a)/span*100)+'%';
 }
-function draw(){ drawOverview(); drawZoom(); drawScroll(); }
+function draw(){ drawOverview(); drawSpec(); drawZoom(); drawScroll(); }
 let playingIdx=-1;
 function updatePlayingChip(){
   const p=now(); let idx=-1;
@@ -932,8 +1194,9 @@ addEventListener('keydown',async e=>{
   if(e.key==='l'){setLoop('mark');return;}
   if(e.key==='L'){setLoop('word');return;}
   if(e.key==='Home'){moveHead(0);return;}
-  // Shift+arrow nudges the mark you are on by 25ms, so a whole clip can be marked without
-  // touching the mouse: tab switches start/end, q/w/e play around it, shift+arrows move it.
+  // Ctrl+Shift+arrow nudges 10ms; Shift+arrow nudges 25ms (up/down 125ms).
+  if(e.key==='ArrowLeft'&&(e.ctrlKey||e.metaKey)&&e.shiftKey){e.preventDefault();setMark(mark()-.01);return;}
+  if(e.key==='ArrowRight'&&(e.ctrlKey||e.metaKey)&&e.shiftKey){e.preventDefault();setMark(mark()+.01);return;}
   if(e.key==='ArrowLeft'&&e.shiftKey){e.preventDefault();setMark(mark()-.025);return;}
   if(e.key==='ArrowRight'&&e.shiftKey){e.preventDefault();setMark(mark()+.025);return;}
   if(e.key==='ArrowDown'&&e.shiftKey){e.preventDefault();setMark(mark()-.125);return;}
@@ -941,10 +1204,6 @@ addEventListener('keydown',async e=>{
   if(e.key==='ArrowLeft'){e.preventDefault();stepMark(-1);return;}
   if(e.key==='ArrowRight'){e.preventDefault();stepMark(1);return;}
   if(e.key==='f'){setMark(now());return;}
-  if(e.key===','){setMark(mark()-.01);return;}
-  if(e.key==='.'){setMark(mark()+.01);return;}
-  if(e.key==='<'){setMark(mark()-.002);return;}
-  if(e.key==='>'){setMark(mark()+.002);return;}
   if(e.key==='Enter'){e.preventDefault();
     if(e.ctrlKey||e.metaKey) await saveNext(); else await save(); return;}
   if(e.key==='s'){if(e.ctrlKey||e.metaKey){e.preventDefault();await save();return;}
