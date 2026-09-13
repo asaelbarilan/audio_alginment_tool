@@ -670,20 +670,42 @@ function delWord(){
 // Marks stay ordered, but only against their immediate neighbours -- clamping a word's end
 // against the NEXT word's end would silently refuse "take aligner B" whenever B places this
 // word later than A placed the following one, which is exactly the disagreement being judged.
+// A real gap between two words is silence and is left alone: pushing a mark into it just
+// stops at the neighbour's mark, same as before. But when two marks are already flush (no
+// gap -- the split between the words is what's misplaced, not any silence), pushing one PAST
+// its neighbour carries the neighbour's mark along too, and the chain continues into further
+// flush words. Without this, closing a wrongly-placed split meant shoving the far mark all the
+// way over to touch its neighbour first, then dragging both back the other way -- pure
+// friction for what is really just "this one boundary is in the wrong place."
+const ADJ_EPS=0.001;                  // "touching, no gap" tolerance, in seconds
+
+// Move word idx's END toward t, carrying the next word's START along when they're flush.
+function pushEnd(idx,t){
+  t=Math.max(t,gold[idx].start+.005);
+  if(idx<gold.length-1){
+    const nextStart=gold[idx+1].start;
+    if(t>nextStart+1e-9){
+      if(Math.abs(gold[idx].end-nextStart)<ADJ_EPS){ pushStart(idx+1,t); t=Math.min(t,gold[idx+1].start); }
+      else t=nextStart;
+    }
+  }else t=Math.min(t,total());
+  gold[idx].end=t; touched.add(idx);
+}
+// Move word idx's START toward t, carrying the previous word's END along when they're flush.
+function pushStart(idx,t){
+  t=Math.min(t,gold[idx].end-.005);
+  if(idx>0){
+    const prevEnd=gold[idx-1].end;
+    if(t<prevEnd-1e-9){
+      if(Math.abs(gold[idx].start-prevEnd)<ADJ_EPS){ pushEnd(idx-1,t); t=Math.max(t,gold[idx-1].end); }
+      else t=prevEnd;
+    }
+  }else t=Math.max(t,tmin());
+  gold[idx].start=t; touched.add(idx);
+}
 function setMark(t,which){
   which=which||edge;
-  // Moving one mark never moves another. Words are NOT contiguous -- there is silence
-  // between them, and that gap is precisely what is being marked, so chaining a word's
-  // start to the previous word's end (as the aligners do) destroys the thing we are here
-  // to measure. Each mark is clamped only so the order stays valid: it cannot cross its own
-  // partner, nor the neighbouring word's nearest mark.
-  if(which==='start'){
-    const lo=(wi>0)?gold[wi-1].end:tmin();
-    gold[wi].start=Math.min(Math.max(t,lo),gold[wi].end-.005);
-  }else{
-    const hi=(wi<gold.length-1)?gold[wi+1].start:total();
-    gold[wi].end=Math.max(Math.min(t,hi),gold[wi].start+.005);
-  }
+  if(which==='start') pushStart(wi,t); else pushEnd(wi,t);
   touched.add(wi); ensureVisible(which==='start'?gold[wi].start:gold[wi].end);
   draw(); render();
   if(loopKind){ const sp=loopSpan(); start(sp[0],sp[1]); }
