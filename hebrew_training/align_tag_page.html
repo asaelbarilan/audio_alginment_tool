@@ -283,7 +283,7 @@ async function load(){
 async function loadClip(){
   stop();
   const c=clips[ci];
-  gold=(c.saved||c.a).map(w=>({word:w.word,start:w.start,end:w.end}));
+  gold=(c.saved||c.words).map(w=>({word:w.word,start:w.start,end:w.end}));
   touched=new Set(c.saved?gold.map((_,i)=>i):[]);
   wi=0; edge='end'; head=0;
   const r=await fetch(api('/api/audio/'+ci)); lead=parseFloat(r.headers.get('X-Lead')||'0');
@@ -302,7 +302,7 @@ const mark=()=>edge==='end'?gold[wi].end:gold[wi].start;
 // Whether a word actually differs from what the source clip carried. Compared against the
 // original aligner values rather than a "was touched" flag, so a mark dragged and dragged
 // back reads as unmodified again, and a saved clip only shows green where it really moved.
-const srcWord=i=>{const s=clips[ci].a;return (s&&s[i])||null;};
+const srcWord=i=>{const s=clips[ci].words;return (s&&s[i])||null;};
 const modified=i=>{
   const w=gold[i];
   if(w.added) return true;

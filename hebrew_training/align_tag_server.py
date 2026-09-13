@@ -10,7 +10,7 @@ So each word shows both proposals, and the common case is one keypress to accept
 one. Dragging is the fallback, not the default.
 
     python -m hebrew_training.align_tag_server \\
-        --a A_hebrew.jsonl --b B_mms.jsonl --out gold.jsonl
+        --datasets-folder data/datasets --dataset plenum --out gold.jsonl
 
 then open http://localhost:8080. Clips are served worst-disagreement-first, because that is
 where a human judgement is worth the most; agreement regions teach nothing.
@@ -18,23 +18,32 @@ where a human judgement is worth the most; agreement regions teach nothing.
 Saves after every clip, so it can be closed and reopened. Standard library plus soundfile —
 no web framework, no CDN, works offline.
 
-The output has the same schema as the input manifests, with `words` carrying the human
-times, so `alignment_disagreement.py` can score any aligner against it directly.
+Datasets live under a folder or a bucket (see --datasets-folder / --datasets-bucket): each
+top-level entry is one dataset, holding a metadata.json, a manifest.jsonl (one row per clip,
+each carrying a `labels` array -- one entry per annotation source, e.g. two forced aligners),
+and an audio/ folder. The `labels[0]` entry seeds the marks; a second label, when present, is
+only used to rank clips by disagreement.
 """
 
 from __future__ import annotations
 
 import argparse
 import io
-import os
 import json
+import os
 import re
-import unicodedata
 import threading
 import time
+import unicodedata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
+
+from dotenv import load_dotenv
+
+# When a .env file is present - load that
+load_dotenv()
+
 
 _WS = re.compile(r"\s+")
 LOCK = threading.Lock()
@@ -43,16 +52,33 @@ LOCK = threading.Lock()
 STORE = None
 CLAIMS = None
 BLOCK = 10  # clips a person holds at once; refilled as they work
-STALE_SECONDS = 24 * 3600  # an unmarked claim this old goes back in the pool, so a person
+STALE_SECONDS = (
+    24 * 3600
+)  # an unmarked claim this old goes back in the pool, so a person
 #                            who opens the page and wanders off does not strand their share
-PAD = 1.0  # seconds of context served either side, so a boundary at the very edge of a
-#           clip is still judgeable by what comes before and after it
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("--a", type=Path, required=True, help="First aligned manifest.")
-    parser.add_argument("--b", type=Path, help="Second aligned manifest, shown for comparison.")
+    parser.add_argument(
+        "--datasets-folder",
+        type=Path,
+        help="Local folder whose top-level subfolders are datasets. Ignored when "
+        "--datasets-bucket is also given.",
+    )
+    parser.add_argument(
+        "--datasets-bucket",
+        help="Read datasets from this S3 bucket instead of the filesystem -- same layout, "
+        "one top-level key prefix per dataset. Takes priority over --datasets-folder. "
+        "Endpoint and credentials come from S3_ENDPOINT / S3_REGION / S3_ACCESS_KEY_ID / "
+        "S3_SECRET_ACCESS_KEY.",
+    )
+    parser.add_argument(
+        "--dataset",
+        required=True,
+        help="Which dataset to serve -- a top-level folder name under --datasets-folder / "
+        "--datasets-bucket.",
+    )
     parser.add_argument(
         "--out",
         type=Path,
@@ -93,21 +119,8 @@ def parse_args() -> argparse.Namespace:
         "agreement between people measured.",
     )
     parser.add_argument(
-        "--clips-s3",
-        help="Read clips from the channel's object store under this key prefix (e.g. "
-        "'clips/') instead of from the image. Any clip the bucket is missing is copied up "
-        "from the image at startup, so the move needs no external blob access.",
+        "--limit", type=int, default=100, help="How many clips to serve."
     )
-    parser.add_argument(
-        "--clips-root",
-        type=Path,
-        help="Look every clip up by file name in this directory instead of the absolute "
-        "path in the manifest. Needed to host: the manifests carry the Windows paths "
-        "they were built with, which resolve nowhere on a Linux server.",
-    )
-    parser.add_argument("--name-a", default="A")
-    parser.add_argument("--name-b", default="B")
-    parser.add_argument("--limit", type=int, default=100, help="How many clips to serve.")
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8080)))
     return parser.parse_args()
 
@@ -116,30 +129,112 @@ def clean(text: str) -> str:
     return _WS.sub(" ", unicodedata.normalize("NFC", text)).strip()
 
 
-def load(path: Path) -> dict[tuple[str, float], dict]:
-    rows = {}
-    if path is None or not path.exists():
-        return rows
-    with path.open(encoding="utf-8") as handle:
-        for line in handle:
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            rows[clip_key(row)] = row
-    return rows
+# ---- datasets --------------------------------------------------------------
+#
+# A dataset is a folder (local or in a bucket) of:
+#   metadata.json     {"name": ...}
+#   manifest.jsonl     one row per clip: {id, metadata, labels: [...]}
+#   audio/<file>.wav    referenced by each label's `audio` field
+#
+# `labels` is one entry per annotation source (what used to be "the A file" and "the B
+# file"), each with its own words -- the same clip, several people's or aligners' opinions
+# of where the boundaries are.
 
 
-def timed(row: dict) -> list[dict]:
+class Dataset:
+    name: str
+
+    def manifest(self) -> list[dict]:
+        raise NotImplementedError
+
+    def metadata(self) -> dict:
+        raise NotImplementedError
+
+    def read_bytes(self, relpath: str) -> bytes:
+        raise NotImplementedError
+
+    def audio_exists(self, relpath: str) -> bool | None:
+        """True/False when checkable up front, None when it can only be known by trying
+        (a bucket read costs a round trip, so it is not worth doing 100 times at startup)."""
+        return None
+
+
+def _read_jsonl(text: str) -> list[dict]:
+    return [json.loads(line) for line in text.splitlines() if line.strip()]
+
+
+class LocalDataset(Dataset):
+    def __init__(self, root: Path, name: str):
+        self.name = name
+        self.dir = root / name
+        if not self.dir.is_dir():
+            available = (
+                sorted(p.name for p in root.iterdir() if p.is_dir())
+                if root.is_dir()
+                else []
+            )
+            raise SystemExit(
+                f"no dataset {name!r} under {root}"
+                + (f" (found: {', '.join(available)})" if available else "")
+            )
+
+    def manifest(self) -> list[dict]:
+        path = self.dir / "manifest.jsonl"
+        if not path.exists():
+            raise SystemExit(f"missing manifest.jsonl in {self.dir}")
+        return _read_jsonl(path.read_text(encoding="utf-8"))
+
+    def metadata(self) -> dict:
+        path = self.dir / "metadata.json"
+        if not path.exists():
+            raise SystemExit(f"missing metadata.json in {self.dir}")
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def read_bytes(self, relpath: str) -> bytes:
+        return (self.dir / relpath).read_bytes()
+
+    def audio_exists(self, relpath: str) -> bool | None:
+        return (self.dir / relpath).exists()
+
+
+class BucketDataset(Dataset):
+    def __init__(self, bucket: str, name: str):
+        self.name = name
+        self.bucket = bucket
+        self.prefix = f"{name}/"
+
+    def manifest(self) -> list[dict]:
+        return _read_jsonl(
+            s3_bytes(self.bucket, self.prefix + "manifest.jsonl").decode("utf-8")
+        )
+
+    def metadata(self) -> dict:
+        return json.loads(
+            s3_bytes(self.bucket, self.prefix + "metadata.json").decode("utf-8")
+        )
+
+    def read_bytes(self, relpath: str) -> bytes:
+        return s3_bytes(self.bucket, self.prefix + relpath)
+
+
+def resolve_dataset(args) -> Dataset:
+    if args.datasets_bucket:
+        return BucketDataset(args.datasets_bucket, args.dataset)
+    if args.datasets_folder:
+        return LocalDataset(args.datasets_folder, args.dataset)
+    raise SystemExit("one of --datasets-folder or --datasets-bucket is required")
+
+
+def timed(label: dict) -> list[dict]:
     return [
         w
-        for w in (row.get("words") or [])
+        for w in (label.get("words") or [])
         if w.get("start") is not None and w.get("end") is not None
     ]
 
 
 def disagreement(a: dict, b: dict | None) -> float:
-    """How far apart the two aligners are on this clip, used to order the work."""
+    """How far apart two label sources are on this clip, used to order the work."""
     if not b:
         return 0.0
     wa, wb = timed(a), timed(b)
@@ -149,35 +244,57 @@ def disagreement(a: dict, b: dict | None) -> float:
     return ends[int(0.9 * (len(ends) - 1))]
 
 
-def build_clips(args) -> list[dict]:
-    """Only clips whose word list reproduces the transcript exactly.
+def build_clips(rows: list[dict], limit: int) -> list[dict]:
+    """Only clips whose first label's words reproduce its transcript exactly.
 
     A clip whose words are a subset of what is spoken is worse than useless here: the
     annotator hears seven words, sees four, and has nowhere to put the boundaries for the
-    missing three. That happens whenever a word was dropped upstream for having no
-    duration -- which is 11-13% of words in this corpus -- so it has to be excluded rather
-    than trusted.
+    missing three. A second label, when the row has one, is used only to rank the work --
+    it is shown for comparison but never has to pass this check itself.
     """
-    rows_a, rows_b = load(args.a), load(args.b)
     clips = []
     skipped = 0
-    for key, row in rows_a.items():
-        words = timed(row)
+    for row in rows:
+        labels = row.get("labels") or []
+        if not labels:
+            continue
+        primary = labels[0]
+        words = timed(primary)
         if len(words) < 2:
             continue
-        transcript = clean(row.get("transcript", ""))
-        if transcript and " ".join(clean(w["word"]) for w in words) != transcript:
+        text = clean(row.get("text", ""))
+        if text and " ".join(clean(w["word"]) for w in words) != text:
             skipped += 1
             continue
-        other = rows_b.get(key)
+        secondary = labels[1] if len(labels) > 1 else None
+        other_words = timed(secondary) if secondary else []
         clips.append(
             {
-                "path": row["path"],
-                "start": round(float(row.get("start", 0.0)), 3),
+                "id": row["id"],
+                "metadata": row.get("metadata") or {},
                 "duration": float(row["duration"]),
-                "transcript": row.get("transcript", ""),
+                "text": row.get("text", ""),
+                "audio": row["audio"],
+                "labels": [
+                    {
+                        "source": label.get("source", ""),
+                        "words": [
+                            {
+                                "word": clean(w["word"]),
+                                "start": float(w["start"]),
+                                "end": float(w["end"]),
+                            }
+                            for w in timed(label)
+                        ],
+                    }
+                    for label in labels
+                ],
                 "a": [
-                    {"word": clean(w["word"]), "start": float(w["start"]), "end": float(w["end"])}
+                    {
+                        "word": clean(w["word"]),
+                        "start": float(w["start"]),
+                        "end": float(w["end"]),
+                    }
                     for w in words
                 ],
                 "b": (
@@ -187,23 +304,25 @@ def build_clips(args) -> list[dict]:
                             "start": float(w["start"]),
                             "end": float(w["end"]),
                         }
-                        for w in timed(other)
+                        for w in other_words
                     ]
-                    if other and len(timed(other)) == len(words)
+                    if secondary and len(other_words) == len(words)
                     else None
                 ),
-                "score": disagreement(row, other),
+                "score": disagreement(primary, secondary),
             }
         )
     if skipped:
         print(f"skipped {skipped} clips whose words do not reproduce the transcript")
     clips.sort(key=lambda c: c["score"], reverse=True)
-    return clips[: args.limit]
+    return clips[:limit]
 
 
 _S3_CACHE: dict[str, bytes] = {}
 _S3_ORDER: list[str] = []
-S3_CACHE_MAX = 48  # ~15 MB of wav; enough that a person working through a block re-reads
+S3_CACHE_MAX = (
+    48  # ~15 MB of wav; enough that a person working through a block re-reads
+)
 #                    nothing, small enough not to hold the whole corpus in memory
 
 
@@ -233,102 +352,38 @@ def s3_client():
     return _S3
 
 
-def s3_bytes(key: str) -> bytes:
-    hit = _S3_CACHE.get(key)
+def s3_bytes(bucket: str, key: str) -> bytes:
+    cache_key = f"{bucket}/{key}"
+    hit = _S3_CACHE.get(cache_key)
     if hit is not None:
         return hit
-    body = s3_client().get_object(Bucket=os.environ["S3_BUCKET"], Key=key)["Body"].read()
-    _S3_CACHE[key] = body
-    _S3_ORDER.append(key)
+    body = s3_client().get_object(Bucket=bucket, Key=key)["Body"].read()
+    _S3_CACHE[cache_key] = body
+    _S3_ORDER.append(cache_key)
     while len(_S3_ORDER) > S3_CACHE_MAX:
         _S3_CACHE.pop(_S3_ORDER.pop(0), None)
     return body
 
 
-def push_clips(clips: list[dict], prefix: str, root: Path | None) -> None:
-    """Copy any clip the bucket is missing up from the image, once, at startup.
+def clip_wav(clip: dict, dataset: Dataset) -> tuple[bytes, float]:
+    """The clip's audio as wav bytes.
 
-    The audio used to be baked into the container, which meant every deploy rebuilt and
-    shipped the whole corpus. Migrating from inside the container uses the credentials the
-    platform already injects, so it needs no external blob access -- which is a console
-    toggle this has no way to set.
-    """
-    client = s3_client()
-    bucket = os.environ["S3_BUCKET"]
-    have = set()
-    token = None
-    while True:
-        page = client.list_objects_v2(
-            **{
-                "Bucket": bucket,
-                "Prefix": prefix,
-                **({"ContinuationToken": token} if token else {}),
-            }
-        )
-        have.update(o["Key"] for o in page.get("Contents", []))
-        token = page.get("NextContinuationToken")
-        if not token:
-            break
-    sent = 0
-    for clip in clips:
-        key = prefix + Path(str(clip["path"]).replace(chr(92), "/")).name
-        if key in have:
-            continue
-        local = resolve(clip["path"], root)
-        if not local.exists():
-            continue
-        client.put_object(Bucket=bucket, Key=key, Body=local.read_bytes(), ContentType="audio/wav")
-        sent += 1
-    print(f"clips in bucket: {len(have) + sent} ({sent} uploaded from the image)")
-
-
-def resolve(path_value: str, root: Path | None) -> Path:
-    """The clip file, rebased onto --clips-root when one is given."""
-    # PurePath cannot split a Windows path on Linux, so take the basename by hand.
-    name = str(path_value).replace("\\", "/").rsplit("/", 1)[-1]
-    return (root / name) if root else Path(path_value)
-
-
-def clip_wav(
-    clip: dict, root: Path | None = None, prefix: str | None = None
-) -> tuple[bytes, float]:
-    """The clip's audio as wav bytes, with PAD seconds of context either side.
-
-    Prefers plain soundfile, because that keeps the tool deployable: reading a window out of
-    a multi-hour source needs `training.dataloader`, which drags in torch and the whole
-    training package. Once the clips have been cut to their own wav files -- which is what
-    `data/gold_set/clips` already is -- the dependency is just soundfile and numpy, small
-    enough to host anywhere.
+    The dataset's audio already is exactly the clip -- no more context pad either side, that
+    was a serving-time convenience of the old per-clip files, not part of the clip itself.
+    Read through soundfile regardless of source, so a non-wav or stereo file still comes out
+    as the mono 16-bit wav the page's <audio> element expects.
     """
     import soundfile
 
-    begin = max(0.0, clip["start"] - PAD)
-    lead = clip["start"] - begin
-    want = clip["duration"] + lead + PAD
-    path = resolve(clip["path"], root)
-
-    if prefix is not None:
-        key = prefix + Path(str(clip["path"]).replace(chr(92), "/")).name
-        source = io.BytesIO(s3_bytes(key))
-    else:
-        source = path if (path.suffix.lower() == ".wav" and path.exists()) else None
-
-    if source is not None:
-        with soundfile.SoundFile(source) as handle:
-            rate = handle.samplerate
-            handle.seek(int(begin * rate))
-            wav = handle.read(int(want * rate), dtype="float32", always_2d=False)
-        if getattr(wav, "ndim", 1) > 1:
-            wav = wav.mean(axis=1)
-    else:
-        from training.dataloader import _load_window
-
-        rate = 24000
-        wav = _load_window(str(path), begin, want, rate)
-
+    raw = dataset.read_bytes(clip["audio"])
+    with soundfile.SoundFile(io.BytesIO(raw)) as handle:
+        rate = handle.samplerate
+        wav = handle.read(dtype="float32", always_2d=False)
+    if getattr(wav, "ndim", 1) > 1:
+        wav = wav.mean(axis=1)
     buffer = io.BytesIO()
     soundfile.write(buffer, wav, rate, format="WAV", subtype="PCM_16")
-    return buffer.getvalue(), lead
+    return buffer.getvalue(), 0.0
 
 
 PAGE_FILE = Path(__file__).with_name("align_tag_page.html")
@@ -461,7 +516,9 @@ class PostgresStore:
 
     def load(self, who: str, clips: list[dict]) -> dict[int, list]:
         with self.connect() as conn:
-            rows = conn.execute("SELECT payload FROM marks WHERE annotator = %s", (who,)).fetchall()
+            rows = conn.execute(
+                "SELECT payload FROM marks WHERE annotator = %s", (who,)
+            ).fetchall()
         if not rows:
             return {}
         return index_rows([r[0] for r in rows], clips)
@@ -499,12 +556,15 @@ class PostgresStore:
         """Mark a claim done, so it is never handed to anyone else."""
         with self.connect() as conn:
             conn.execute(
-                "UPDATE claims SET done = true WHERE clip_key = %s AND annotator = %s", (key, who)
+                "UPDATE claims SET done = true WHERE clip_key = %s AND annotator = %s",
+                (key, who),
             )
 
     def binding(self, sub: str) -> str | None:
         with self.connect() as conn:
-            row = conn.execute("SELECT name FROM identities WHERE sub = %s", (sub,)).fetchone()
+            row = conn.execute(
+                "SELECT name FROM identities WHERE sub = %s", (sub,)
+            ).fetchone()
         return row[0] if row else None
 
     def bind(self, sub: str, name: str, email: str, display: str) -> str | None:
@@ -516,7 +576,9 @@ class PostgresStore:
         everybody's work.
         """
         with self.connect() as conn:
-            held = conn.execute("SELECT sub FROM identities WHERE name = %s", (name,)).fetchone()
+            held = conn.execute(
+                "SELECT sub FROM identities WHERE name = %s", (name,)
+            ).fetchone()
             if held and held[0] != sub:
                 return None
             conn.execute(
@@ -531,8 +593,9 @@ class PostgresStore:
         """Split the old one-blob-per-annotator marks into one row per clip.
 
         Runs only after a user confirms on the page; the table is left untouched until then.
-        clip_key is rebuilt from each stored record's path/start with the same rules as
-        clip_key(), so the new rows line up with the claims table.
+        clip_key is rebuilt from each stored record exactly as it was computed when that
+        record was saved (path/start under the legacy per-source dataset), so the new rows
+        line up with the claims table made under that same scheme.
         """
         with self.connect() as conn:
             conn.execute(
@@ -549,12 +612,20 @@ class PostgresStore:
             for annotator, payload, updated_at in old:
                 rows = payload if isinstance(payload, list) else [payload]
                 for row in rows:
-                    name = str(row["path"]).replace("\\", "/").rsplit("/", 1)[-1]
-                    key = f"{name}@{round(float(row['start']), 3)}"
+                    if "id" in row:
+                        key = row["id"]
+                    else:
+                        name = str(row["path"]).replace("\\", "/").rsplit("/", 1)[-1]
+                        key = f"{name}@{round(float(row['start']), 3)}"
                     conn.execute(
                         "INSERT INTO marks_new (annotator, clip_key, payload, updated_at)"
                         " VALUES (%s, %s, %s, %s)",
-                        (annotator, key, json.dumps(row, ensure_ascii=False), updated_at),
+                        (
+                            annotator,
+                            key,
+                            json.dumps(row, ensure_ascii=False),
+                            updated_at,
+                        ),
                     )
             conn.execute("DROP TABLE marks")
             conn.execute("ALTER TABLE marks_new RENAME TO marks")
@@ -594,7 +665,7 @@ class PostgresStore:
         for name, count in holding.items():
             if not any(r["name"] == name for r in rows):
                 rows.append({"name": name, "marked": 0, "holding": count, "last": None})
-        return sorted(rows, key=lambda r: (r["last"] or 0), reverse=True)
+        return sorted(rows, key=lambda r: r["last"] or 0, reverse=True)
 
     def save(self, who: str, clips: list[dict], saved: dict[int, list]) -> None:
         """Upsert one row per saved clip, so a save touches only what changed."""
@@ -608,7 +679,9 @@ class PostgresStore:
                     (
                         who,
                         clip_key(clips[index]),
-                        json.dumps(gold_row(clips[index], saved[index]), ensure_ascii=False),
+                        json.dumps(
+                            gold_row(clips[index], saved[index]), ensure_ascii=False
+                        ),
                     ),
                 )
 
@@ -656,15 +729,12 @@ class FileClaims:
 
 
 def clip_key(clip: dict) -> str:
-    """Stable id for a clip: its file name and start.
+    """Stable id for a clip: the dataset's own id, generated once at conversion time.
 
-    Deliberately not the full path. The manifests were written with absolute Windows paths,
-    marks already in the database carry those, and a published dataset has to use relative
-    ones -- keying on the name lets all three refer to the same clip, so changing how paths
-    are written does not orphan work already done.
+    Simpler than it used to be -- the legacy manifests carried no id of their own, so a key
+    was built from the clip's file name and offset. A dataset row has an id already.
     """
-    name = str(clip["path"]).replace("\\", "/").rsplit("/", 1)[-1]
-    return f"{name}@{round(float(clip['start']), 3)}"
+    return clip["id"]
 
 
 def assign(claimer, who: str, clips: list[dict], marked: set[int]) -> set[int]:
@@ -699,13 +769,12 @@ def assign(claimer, who: str, clips: list[dict], marked: set[int]) -> set[int]:
 
 
 def gold_row(clip: dict, words: list) -> dict:
-    """One output record. Same schema as the input manifests, so a gold file can be scored
-    against any aligner with no conversion."""
+    """One output record: the clip's id plus the human words, so a gold file can be scored
+    against any dataset export with no path/offset guessing."""
     return {
-        "path": clip["path"],
-        "start": clip["start"],
+        "id": clip["id"],
+        "text": clip["text"],
         "duration": clip["duration"],
-        "transcript": clip["transcript"],
         "words": [
             {
                 "word": w["word"],
@@ -715,7 +784,7 @@ def gold_row(clip: dict, words: list) -> dict:
                 # be able to separate a corrected clip from one that was right already.
                 **({"was": w["was"]} if w.get("was") is not None else {}),
                 # A word the transcript never had. A word it had and should not have is
-                # simply absent -- the clip keeps its original `transcript`, so a deletion
+                # simply absent -- the clip keeps its original `text`, so a deletion
                 # stays recoverable without a flag of its own.
                 **({"added": True} if w.get("added") else {}),
             }
@@ -725,11 +794,11 @@ def gold_row(clip: dict, words: list) -> dict:
 
 
 def index_rows(rows: list[dict], clips: list[dict]) -> dict[int, list]:
-    """Saved records -> {clip index: words}, matched on (path, start)."""
-    by_key = {clip_key(r): r["words"] for r in rows}
+    """Saved records -> {clip index: words}, matched on id."""
+    by_key = {r["id"]: r["words"] for r in rows if "id" in r}
     out = {}
     for index, clip in enumerate(clips):
-        hit = by_key.get(clip_key(clip))
+        hit = by_key.get(clip["id"])
         if hit:
             out[index] = hit
     return out
@@ -754,16 +823,17 @@ def load_saved(path: Path, clips: list[dict]) -> dict[int, list]:
             row = json.loads(line)
         except json.JSONDecodeError:
             continue
-        by_key[clip_key(row)] = row["words"]
+        if "id" in row:
+            by_key[row["id"]] = row["words"]
     out = {}
     for index, clip in enumerate(clips):
-        hit = by_key.get(clip_key(clip))
+        hit = by_key.get(clip["id"])
         if hit:
             out[index] = hit
     return out
 
 
-def make_handler(args, clips, saved):
+def make_handler(args, dataset: Dataset, clips, saved):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):  # noqa: A003 -- quiet; progress is in the page
             pass
@@ -805,7 +875,9 @@ def make_handler(args, clips, saved):
 
             if not args.token:
                 return True
-            return (parse_qs(urlparse(self.path).query).get("t") or [""])[0] == args.token
+            return (parse_qs(urlparse(self.path).query).get("t") or [""])[
+                0
+            ] == args.token
 
         def do_GET(self):
             route = urlparse(self.path).path
@@ -843,26 +915,39 @@ def make_handler(args, clips, saved):
                 # The old marks schema is not writable. Nothing is lost by refusing:
                 # the page shows the migration gate, and until a user confirms there is
                 # no safe way to write a fix without overwriting another annotator's blob.
-                return self.send(503, b'{"error":"database migration required"}', "application/json")
+                return self.send(
+                    503, b'{"error":"database migration required"}', "application/json"
+                )
             if args.auth and route.startswith("/api/") and route != "/api/progress":
                 if not self.signed_in():
                     return self.send(401, b'{"error":"sign in"}', "application/json")
                 if not self.who():
-                    return self.send(409, b'{"error":"pick a name"}', "application/json")
+                    return self.send(
+                        409, b'{"error":"pick a name"}', "application/json"
+                    )
             if route == "/api/meta":
-                meta = {"multi": bool(args.multi), "clips": len(clips)}
-                return self.send(200, json.dumps(meta).encode("utf-8"), "application/json")
+                meta = {
+                    "multi": bool(args.multi),
+                    "clips": len(clips),
+                    "dataset": dataset.name,
+                }
+                return self.send(
+                    200, json.dumps(meta).encode("utf-8"), "application/json"
+                )
             if route == "/api/export":
                 # The marks live in Postgres once hosted, but the rest of the pipeline reads
-                # jsonl -- alignment_disagreement.py keys on (path, start). So export in
-                # exactly the input manifest's shape, with the annotator added, and nothing
-                # else: a file that needs converting before it can be scored is a file that
-                # will be scored wrong.
+                # jsonl keyed on clip id. So export in exactly that shape, with the
+                # annotator added, and nothing else: a file that needs converting before it
+                # can be scored is a file that will be scored wrong.
                 lines = []
                 if STORE is not None:
                     for name, payload in STORE.everything():
                         for row in payload:
-                            lines.append(json.dumps({**row, "annotator": name}, ensure_ascii=False))
+                            lines.append(
+                                json.dumps(
+                                    {**row, "annotator": name}, ensure_ascii=False
+                                )
+                            )
                 else:
                     directory = args.out if args.multi else args.out.parent
                     for f in sorted(directory.glob("*.jsonl")):
@@ -889,7 +974,9 @@ def make_handler(args, clips, saved):
                     directory = args.out if args.multi else args.out.parent
                     for f in sorted(directory.glob("*.jsonl")):
                         lines = [
-                            ln for ln in f.read_text(encoding="utf-8").splitlines() if ln.strip()
+                            ln
+                            for ln in f.read_text(encoding="utf-8").splitlines()
+                            if ln.strip()
                         ]
                         rows.append(
                             {
@@ -905,32 +992,15 @@ def make_handler(args, clips, saved):
                     "marked_total": sum(r["marked"] for r in rows),
                 }
                 # Where the audio is actually coming from. Without this there is no way to
-                # tell from outside whether the bucket is populated, and the image copy
-                # cannot safely be removed on a guess.
-                if args.clips_s3:
-                    try:
-                        client = s3_client()
-                        held, token = 0, None
-                        while True:
-                            # not `page`: that is the module function serving the HTML, and
-                            # shadowing it here makes it local to the whole handler, so
-                            # GET / would raise and the health check would call the app dead
-                            listing = client.list_objects_v2(
-                                **{
-                                    "Bucket": os.environ["S3_BUCKET"],
-                                    "Prefix": args.clips_s3,
-                                    **({"ContinuationToken": token} if token else {}),
-                                }
-                            )
-                            held += listing.get("KeyCount", 0)
-                            token = listing.get("NextContinuationToken")
-                            if not token:
-                                break
-                        body["audio"] = {"source": "bucket", "objects": held}
-                    except Exception as exc:  # noqa: BLE001
-                        body["audio"] = {"source": "bucket", "error": type(exc).__name__}
+                # tell from outside which dataset source is live.
+                if isinstance(dataset, BucketDataset):
+                    body["audio"] = {
+                        "source": "bucket",
+                        "bucket": dataset.bucket,
+                        "dataset": dataset.name,
+                    }
                 else:
-                    body["audio"] = {"source": "image"}
+                    body["audio"] = {"source": "folder", "dataset": dataset.name}
                 return self.send(
                     200,
                     json.dumps(body, ensure_ascii=False).encode("utf-8"),
@@ -955,10 +1025,18 @@ def make_handler(args, clips, saved):
                 for index, clip in enumerate(clips):
                     if owned is not None and index not in owned:
                         continue
-                    entry = dict(clip)
-                    entry["key"] = clip_key(clip)
-                    entry["saved"] = mine.get(index)
-                    payload.append(entry)
+                    payload.append(
+                        {
+                            "id": clip["id"],
+                            "key": clip["id"],
+                            "metadata": clip["metadata"],
+                            "text": clip["text"],
+                            "duration": clip["duration"],
+                            "words": clip["a"],
+                            "labels": clip["labels"],
+                            "saved": mine.get(index),
+                        }
+                    )
                 return self.send(
                     200,
                     json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -967,7 +1045,7 @@ def make_handler(args, clips, saved):
             if route.startswith("/api/audio/"):
                 index = int(route.rsplit("/", 1)[1])
                 try:
-                    data, lead = clip_wav(clips[index], args.clips_root, args.clips_s3)
+                    data, lead = clip_wav(clips[index], dataset)
                 except Exception as exc:  # noqa: BLE001 -- a bad clip must not kill the server
                     return self.send(500, str(exc).encode(), "text/plain")
                 headers = {"X-Lead": f"{lead:.4f}", "Accept-Ranges": "bytes"}
@@ -997,10 +1075,14 @@ def make_handler(args, clips, saved):
                 if not person or STORE is None:
                     return self.send(401, b'{"error":"sign in"}', "application/json")
                 length = int(self.headers.get("Content-Length", 0))
-                wanted = json.loads(self.rfile.read(length).decode("utf-8")).get("name", "")
+                wanted = json.loads(self.rfile.read(length).decode("utf-8")).get(
+                    "name", ""
+                )
                 if not _NAME.match(wanted):
                     return self.send(400, b'{"error":"bad name"}', "application/json")
-                bound = STORE.bind(person["sub"], wanted, person["email"], person["display"])
+                bound = STORE.bind(
+                    person["sub"], wanted, person["email"], person["display"]
+                )
                 if bound is None:
                     return self.send(409, b'{"error":"taken"}', "application/json")
                 return self.send(
@@ -1010,14 +1092,22 @@ def make_handler(args, clips, saved):
                 # Confirmed by any user on the page. Until this runs the whole store is
                 # read-only, so there is no window where one blob is half-split.
                 if STORE is None or not STORE.pending_migration:
-                    return self.send(409, b'{"error":"no migration pending"}', "application/json")
+                    return self.send(
+                        409, b'{"error":"no migration pending"}', "application/json"
+                    )
                 try:
                     STORE.migrate()
                 except Exception as exc:  # noqa: BLE001 -- surface whatever failed
-                    return self.send(500, json.dumps({"error": str(exc)}).encode(), "application/json")
+                    return self.send(
+                        500,
+                        json.dumps({"error": str(exc)}).encode(),
+                        "application/json",
+                    )
                 return self.send(200, b'{"ok":true}', "application/json")
             if STORE is not None and STORE.pending_migration:
-                return self.send(503, b'{"error":"database migration required"}', "application/json")
+                return self.send(
+                    503, b'{"error":"database migration required"}', "application/json"
+                )
             if args.auth and not self.who():
                 return self.send(401, b'{"error":"sign in"}', "application/json")
             if route != "/api/gold":
@@ -1070,20 +1160,31 @@ def write_gold(out: Path, clips: list[dict], saved: dict[int, list]) -> None:
 def main() -> None:
     global STORE, CLAIMS
     args = parse_args()
+    if not args.datasets_bucket and not args.datasets_folder:
+        raise SystemExit("one of --datasets-folder or --datasets-bucket is required")
+
     database = os.environ.get("DATABASE_URL", "")
     if database:
         STORE = PostgresStore(database)
         print("marks -> Postgres (DATABASE_URL)")
     if args.auth and STORE is None:
-        raise SystemExit("--auth needs DATABASE_URL: the name bindings live in the database")
+        raise SystemExit(
+            "--auth needs DATABASE_URL: the name bindings live in the database"
+        )
     if args.auth:
         print("google sign-in required; ?who= ignored")
     if args.split:
         CLAIMS = STORE if STORE is not None else FileClaims(args.out)
         print(f"split mode: each annotator gets their own clips, {BLOCK} at a time")
-    clips = build_clips(args)
+
+    dataset = resolve_dataset(args)
+    meta = dataset.metadata()
+    kind = "bucket" if isinstance(dataset, BucketDataset) else "folder"
+    print(f"dataset: {meta.get('name', dataset.name)} ({kind})")
+
+    clips = build_clips(dataset.manifest(), args.limit)
     if not clips:
-        raise SystemExit(f"no usable clips in {args.a}")
+        raise SystemExit(f"no usable clips in dataset {args.dataset!r}")
 
     # In --multi each annotator has their own file, loaded per request from their name;
     # there is no single shared state to resume into here.
@@ -1091,23 +1192,18 @@ def main() -> None:
     if saved:
         print(f"resuming: {len(saved)} clips already marked")
 
-    if args.clips_s3:
-        push_clips(clips, args.clips_s3, args.clips_root)
-    missing = (
-        []
-        if args.clips_s3
-        else [c for c in clips if not resolve(c["path"], args.clips_root).exists()]
-    )
-    if missing:
-        hint = " (try --clips-root)" if not args.clips_root else ""
-        first = resolve(missing[0]["path"], args.clips_root)
-        print(
-            f"{len(missing)} of {len(clips)} clip files are not where the "
-            f"manifest says they are{hint}."
-        )
-        raise SystemExit(f"  first missing: {first}")
+    if isinstance(dataset, LocalDataset):
+        missing = [c for c in clips if dataset.audio_exists(c["audio"]) is False]
+        if missing:
+            first = dataset.dir / missing[0]["audio"]
+            raise SystemExit(
+                f"{len(missing)} of {len(clips)} clip audio files are not where the "
+                f"manifest says they are; first missing: {first}"
+            )
 
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(args, clips, saved))
+    server = ThreadingHTTPServer(
+        (args.host, args.port), make_handler(args, dataset, clips, saved)
+    )
     words = sum(len(c["a"]) for c in clips)
     print(f"{len(clips)} clips, {words} boundaries to check")
     where = "localhost" if args.host in ("127.0.0.1", "localhost") else args.host
