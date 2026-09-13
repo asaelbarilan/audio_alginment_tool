@@ -883,14 +883,14 @@ $('skip').onclick=()=>{if(ci<clips.length-1){ci++;loadClip();}};
 // even on a clip whose boundaries are not finished.
 async function save(){
   await fetch(api('/api/gold'),{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({index:ci,key:clips[ci].key,words:gold})});
+    body:JSON.stringify({index:ci,key:clips[ci].key,words:gold,next:false})});
   clips[ci].saved=gold.map(w=>({...w}));
   render();
 }
 
 async function saveNext(){
   await fetch(api('/api/gold'),{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({index:ci,key:clips[ci].key,words:gold})});
+    body:JSON.stringify({index:ci,key:clips[ci].key,words:gold,next:true})});
   clips[ci].saved=gold.map(w=>({...w}));
   if(ci<clips.length-1){ci++;await loadClip();} else render();
 }

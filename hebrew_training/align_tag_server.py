@@ -1232,7 +1232,10 @@ def make_handler(args, dataset: Dataset, clips, saved):
                     mine = load_saved(path, clips)
                     mine[index] = body["words"]
                     write_gold(path, clips, mine)
-                if CLAIMS is not None:
+                # "save" alone is a checkpoint for a clip still being worked on; only
+                # "save & next" (or its shortcuts) should retire the claim, so it is
+                # never handed to someone else while the annotator is mid-edit.
+                if CLAIMS is not None and body.get("next"):
                     CLAIMS.finish(who, clip_key(clips[index]))
             return self.send(200, b'{"ok":true}', "application/json")
 
