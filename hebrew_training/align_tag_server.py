@@ -68,6 +68,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--datasets-bucket",
+        default=os.environ.get("DATASETS_BUCKET") or os.environ.get("S3_BUCKET", ""),
         help="Read datasets from this S3 bucket instead of the filesystem -- same layout, "
         "one top-level key prefix per dataset. Takes priority over --datasets-folder. "
         "Endpoint and credentials come from S3_ENDPOINT / S3_REGION / S3_ACCESS_KEY_ID / "

@@ -11,8 +11,9 @@ set -eu
 # without a database.
 # install.sh's uv sync built .venv on CPython 3.11; run from it so the pinned
 # interpreter and dependencies win, not whatever system python is default.
+BUCKET="${DATASETS_BUCKET:-${S3_BUCKET:-}}"
 exec .venv/bin/python -m hebrew_training.align_tag_server \
-  ${DATASETS_BUCKET:+--datasets-bucket "$DATASETS_BUCKET"} \
+  ${BUCKET:+--datasets-bucket "$BUCKET"} \
   --datasets-folder data/datasets \
   --dataset "${DATASET:-plenum}" \
   --out /tmp/marks --multi --split --limit 134 \
