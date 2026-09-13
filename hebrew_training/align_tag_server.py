@@ -468,13 +468,23 @@ class PostgresStore:
     One row per annotator holding their whole mark set. At 134 clips that is a few KB, so
     rewriting the blob per save costs nothing and removes every question about partial
     writes -- the same reasoning as rewriting the jsonl file in full.
+
+    `claims` and `marks` are scoped by `dataset` -- a clip's `id` is only unique *within*
+    its dataset, and the same database can outlive one dataset (a later run points the
+    same DATABASE_URL at a different --dataset, or in principle several are served at
+    once). Without the dataset column, two unrelated datasets sharing a database would
+    either collide on a repeated id or, more mundanely, just get counted together in
+    every claim/progress/export query -- there would be no way to tell whose clip a row
+    belonged to. `identities` stays global: an annotator's name binding is a property of
+    their account, not of whatever dataset they happen to be marking.
     """
 
-    def __init__(self, url: str):
+    def __init__(self, url: str, dataset: str):
         import psycopg
 
         self.psycopg = psycopg
         self.url = url
+        self.dataset = dataset
         self.pending_migration = False
         with self.connect() as conn:
             conn.execute(
@@ -484,33 +494,70 @@ class PostgresStore:
                 "  email   TEXT,"
                 "  display TEXT)"
             )
+            self._ensure_claims_table(conn)
+            self._ensure_marks_table(conn)
+
+    def _ensure_claims_table(self, conn) -> None:
+        if conn.execute("SELECT to_regclass('claims')").fetchone()[0] is None:
             conn.execute(
-                "CREATE TABLE IF NOT EXISTS claims ("
-                "  clip_key   TEXT PRIMARY KEY,"
+                "CREATE TABLE claims ("
+                "  dataset    TEXT NOT NULL,"
+                "  clip_key   TEXT NOT NULL,"
                 "  annotator  TEXT NOT NULL,"
                 "  claimed_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
-                "  done       BOOLEAN NOT NULL DEFAULT false)"
+                "  done       BOOLEAN NOT NULL DEFAULT false,"
+                "  PRIMARY KEY (dataset, clip_key))"
             )
-            # marks: one row per (annotator, clip), so a save only rewrites the clip that
-            # changed. A pre-existing table without the clip_key column is the old
-            # schema (one JSONB blob per annotator) and is served read-only until a user
-            # confirms the migration -- see migrate().
-            if conn.execute("SELECT to_regclass('marks')").fetchone()[0] is None:
-                conn.execute(
-                    "CREATE TABLE IF NOT EXISTS marks ("
-                    "  annotator  TEXT NOT NULL,"
-                    "  clip_key   TEXT NOT NULL,"
-                    "  payload    JSONB NOT NULL,"
-                    "  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
-                    "  PRIMARY KEY (annotator, clip_key))"
-                )
-            else:
-                column = conn.execute(
-                    "SELECT column_name FROM information_schema.columns"
-                    " WHERE table_name = 'marks' AND column_name = 'clip_key'"
-                ).fetchone()
-                if column is None:
-                    self.pending_migration = True
+            return
+        has_dataset = conn.execute(
+            "SELECT column_name FROM information_schema.columns"
+            " WHERE table_name = 'claims' AND column_name = 'dataset'"
+        ).fetchone()
+        if has_dataset is not None:
+            return
+        # Pre-dates multi-dataset serving. Nothing is lost rebuilding it in place if it
+        # is empty; if it is not, a person needs to confirm the migration first -- same
+        # gate as the marks blob migration below.
+        if conn.execute("SELECT count(*) FROM claims").fetchone()[0] == 0:
+            conn.execute("DROP TABLE claims")
+            self._ensure_claims_table(conn)
+        else:
+            self.pending_migration = True
+
+    def _ensure_marks_table(self, conn) -> None:
+        # marks: one row per (dataset, annotator, clip), so a save only rewrites the clip
+        # that changed. A pre-existing table without the clip_key column is the old
+        # schema (one JSONB blob per annotator); one without the dataset column pre-dates
+        # multi-dataset serving. Either is served read-only until a user confirms the
+        # migration -- see migrate().
+        if conn.execute("SELECT to_regclass('marks')").fetchone()[0] is None:
+            conn.execute(
+                "CREATE TABLE marks ("
+                "  dataset    TEXT NOT NULL,"
+                "  annotator  TEXT NOT NULL,"
+                "  clip_key   TEXT NOT NULL,"
+                "  payload    JSONB NOT NULL,"
+                "  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
+                "  PRIMARY KEY (dataset, annotator, clip_key))"
+            )
+            return
+        columns = {
+            r[0]
+            for r in conn.execute(
+                "SELECT column_name FROM information_schema.columns"
+                " WHERE table_name = 'marks'"
+            ).fetchall()
+        }
+        if "dataset" in columns:
+            return
+        if "clip_key" not in columns:
+            self.pending_migration = True  # ancient one-blob-per-annotator shape
+            return
+        if conn.execute("SELECT count(*) FROM marks").fetchone()[0] == 0:
+            conn.execute("DROP TABLE marks")
+            self._ensure_marks_table(conn)
+        else:
+            self.pending_migration = True
 
     def connect(self):
         return self.psycopg.connect(self.url, autocommit=True)
@@ -518,7 +565,8 @@ class PostgresStore:
     def load(self, who: str, clips: list[dict]) -> dict[int, list]:
         with self.connect() as conn:
             rows = conn.execute(
-                "SELECT payload FROM marks WHERE annotator = %s", (who,)
+                "SELECT payload FROM marks WHERE dataset = %s AND annotator = %s",
+                (self.dataset, who),
             ).fetchall()
         if not rows:
             return {}
@@ -528,6 +576,8 @@ class PostgresStore:
         with self.connect() as conn:
             rows = conn.execute(
                 "SELECT clip_key, annotator, EXTRACT(EPOCH FROM claimed_at) FROM claims"
+                " WHERE dataset = %s",
+                (self.dataset,),
             ).fetchall()
         return {r[0]: (r[1], float(r[2])) for r in rows}
 
@@ -545,20 +595,21 @@ class PostgresStore:
         with self.connect() as conn:
             for key in keys:
                 conn.execute(
-                    "INSERT INTO claims (clip_key, annotator) VALUES (%s, %s)"
-                    " ON CONFLICT (clip_key) DO UPDATE"
+                    "INSERT INTO claims (dataset, clip_key, annotator) VALUES (%s, %s, %s)"
+                    " ON CONFLICT (dataset, clip_key) DO UPDATE"
                     "   SET annotator = EXCLUDED.annotator, claimed_at = now(), done = false"
                     " WHERE claims.annotator = %s"
                     "    OR (claims.done = false AND claims.claimed_at < to_timestamp(%s))",
-                    (key, who, who, cutoff),
+                    (self.dataset, key, who, who, cutoff),
                 )
 
     def finish(self, who: str, key: str) -> None:
         """Mark a claim done, so it is never handed to anyone else."""
         with self.connect() as conn:
             conn.execute(
-                "UPDATE claims SET done = true WHERE clip_key = %s AND annotator = %s",
-                (key, who),
+                "UPDATE claims SET done = true"
+                " WHERE dataset = %s AND clip_key = %s AND annotator = %s",
+                (self.dataset, key, who),
             )
 
     def binding(self, sub: str) -> str | None:
@@ -591,67 +642,109 @@ class PostgresStore:
         return name
 
     def migrate(self) -> None:
-        """Split the old one-blob-per-annotator marks into one row per clip.
+        """Bring marks/claims up to the current, dataset-scoped schema.
 
-        Runs only after a user confirms on the page; the table is left untouched until then.
-        clip_key is rebuilt from each stored record exactly as it was computed when that
-        record was saved (path/start under the legacy per-source dataset), so the new rows
-        line up with the claims table made under that same scheme.
+        Runs only after a user confirms on the page; both tables are left untouched until
+        then. Two independent gaps can be pending, and either or both are fixed here:
+
+          - marks is still the ancient one-blob-per-annotator shape (no clip_key column).
+            Split into one row per clip, same as before, `clip_key` rebuilt exactly as it
+            was computed when that record was saved (id, or path/start under the legacy
+            per-source dataset).
+          - marks and/or claims exist but have no `dataset` column yet, from before a
+            database could ever hold more than one dataset's rows. Every row from that
+            era was written against whichever dataset this process is currently
+            configured for -- the only dataset any of them could have belonged to at the
+            time -- so that is what backfills the new column.
         """
         with self.connect() as conn:
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS marks_new ("
-                "  annotator  TEXT NOT NULL,"
-                "  clip_key   TEXT NOT NULL,"
-                "  payload    JSONB NOT NULL,"
-                "  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
-                "  PRIMARY KEY (annotator, clip_key))"
-            )
-            old = conn.execute(
-                "SELECT annotator, payload, updated_at FROM marks ORDER BY annotator"
-            ).fetchall()
-            for annotator, payload, updated_at in old:
-                rows = payload if isinstance(payload, list) else [payload]
-                for row in rows:
-                    if "id" in row:
-                        key = row["id"]
-                    else:
-                        name = str(row["path"]).replace("\\", "/").rsplit("/", 1)[-1]
-                        key = f"{name}@{round(float(row['start']), 3)}"
-                    conn.execute(
-                        "INSERT INTO marks_new (annotator, clip_key, payload, updated_at)"
-                        " VALUES (%s, %s, %s, %s)",
-                        (
-                            annotator,
-                            key,
-                            json.dumps(row, ensure_ascii=False),
-                            updated_at,
-                        ),
-                    )
-            conn.execute("DROP TABLE marks")
-            conn.execute("ALTER TABLE marks_new RENAME TO marks")
+            marks_columns = {
+                r[0]
+                for r in conn.execute(
+                    "SELECT column_name FROM information_schema.columns"
+                    " WHERE table_name = 'marks'"
+                ).fetchall()
+            }
+            if "clip_key" not in marks_columns:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS marks_new ("
+                    "  dataset    TEXT NOT NULL,"
+                    "  annotator  TEXT NOT NULL,"
+                    "  clip_key   TEXT NOT NULL,"
+                    "  payload    JSONB NOT NULL,"
+                    "  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
+                    "  PRIMARY KEY (dataset, annotator, clip_key))"
+                )
+                old = conn.execute(
+                    "SELECT annotator, payload, updated_at FROM marks ORDER BY annotator"
+                ).fetchall()
+                for annotator, payload, updated_at in old:
+                    rows = payload if isinstance(payload, list) else [payload]
+                    for row in rows:
+                        if "id" in row:
+                            key = row["id"]
+                        else:
+                            name = str(row["path"]).replace("\\", "/").rsplit("/", 1)[-1]
+                            key = f"{name}@{round(float(row['start']), 3)}"
+                        conn.execute(
+                            "INSERT INTO marks_new (dataset, annotator, clip_key, payload, updated_at)"
+                            " VALUES (%s, %s, %s, %s, %s)",
+                            (
+                                self.dataset,
+                                annotator,
+                                key,
+                                json.dumps(row, ensure_ascii=False),
+                                updated_at,
+                            ),
+                        )
+                conn.execute("DROP TABLE marks")
+                conn.execute("ALTER TABLE marks_new RENAME TO marks")
+            elif "dataset" not in marks_columns:
+                conn.execute("ALTER TABLE marks ADD COLUMN dataset TEXT")
+                conn.execute("UPDATE marks SET dataset = %s", (self.dataset,))
+                conn.execute("ALTER TABLE marks ALTER COLUMN dataset SET NOT NULL")
+                conn.execute("ALTER TABLE marks DROP CONSTRAINT marks_pkey")
+                conn.execute("ALTER TABLE marks ADD PRIMARY KEY (dataset, annotator, clip_key)")
+
+            claims_columns = {
+                r[0]
+                for r in conn.execute(
+                    "SELECT column_name FROM information_schema.columns"
+                    " WHERE table_name = 'claims'"
+                ).fetchall()
+            }
+            if claims_columns and "dataset" not in claims_columns:
+                conn.execute("ALTER TABLE claims ADD COLUMN dataset TEXT")
+                conn.execute("UPDATE claims SET dataset = %s", (self.dataset,))
+                conn.execute("ALTER TABLE claims ALTER COLUMN dataset SET NOT NULL")
+                conn.execute("ALTER TABLE claims DROP CONSTRAINT claims_pkey")
+                conn.execute("ALTER TABLE claims ADD PRIMARY KEY (dataset, clip_key)")
         self.pending_migration = False
 
     def everything(self) -> list[tuple[str, list]]:
-        """Every annotator's marks, for export."""
+        """Every annotator's marks for this dataset, for export."""
         with self.connect() as conn:
             rows = conn.execute(
                 "SELECT annotator, jsonb_agg(payload ORDER BY clip_key)"
-                "  FROM marks GROUP BY annotator"
+                "  FROM marks WHERE dataset = %s GROUP BY annotator",
+                (self.dataset,),
             ).fetchall()
         return [(r[0], r[1]) for r in rows]
 
     def progress(self) -> list[dict]:
-        """Who has marked what. With the tool open to more than one person there is
-        otherwise no way to see that anyone has been working, or who."""
+        """Who has marked what in this dataset. With the tool open to more than one
+        person there is otherwise no way to see that anyone has been working, or who."""
         with self.connect() as conn:
             marks = conn.execute(
                 "SELECT annotator, count(*),"
                 "       EXTRACT(EPOCH FROM max(updated_at))"
-                "  FROM marks GROUP BY annotator"
+                "  FROM marks WHERE dataset = %s GROUP BY annotator",
+                (self.dataset,),
             ).fetchall()
             held = conn.execute(
-                "SELECT annotator, count(*) FROM claims WHERE done = false GROUP BY annotator"
+                "SELECT annotator, count(*) FROM claims"
+                " WHERE dataset = %s AND done = false GROUP BY annotator",
+                (self.dataset,),
             ).fetchall()
         holding = {r[0]: int(r[1]) for r in held}
         rows = [
@@ -673,11 +766,12 @@ class PostgresStore:
         with self.connect() as conn:
             for index in sorted(saved):
                 conn.execute(
-                    "INSERT INTO marks (annotator, clip_key, payload, updated_at)"
-                    " VALUES (%s, %s, %s, now())"
-                    " ON CONFLICT (annotator, clip_key) DO UPDATE"
+                    "INSERT INTO marks (dataset, annotator, clip_key, payload, updated_at)"
+                    " VALUES (%s, %s, %s, %s, now())"
+                    " ON CONFLICT (dataset, annotator, clip_key) DO UPDATE"
                     "   SET payload = EXCLUDED.payload, updated_at = now()",
                     (
+                        self.dataset,
                         who,
                         clip_key(clips[index]),
                         json.dumps(
@@ -1170,8 +1264,8 @@ def main() -> None:
 
     database = os.environ.get("DATABASE_URL", "")
     if database:
-        STORE = PostgresStore(database)
-        print("marks -> Postgres (DATABASE_URL)")
+        STORE = PostgresStore(database, args.dataset)
+        print(f"marks -> Postgres (DATABASE_URL), dataset {args.dataset!r}")
     if args.auth and STORE is None:
         raise SystemExit(
             "--auth needs DATABASE_URL: the name bindings live in the database"
