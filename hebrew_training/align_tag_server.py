@@ -37,7 +37,7 @@ import time
 import unicodedata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from dotenv import load_dotenv
 
@@ -930,6 +930,10 @@ def load_saved(path: Path, clips: list[dict]) -> dict[int, list]:
 
 
 def make_handler(args, dataset: Dataset, clips, saved):
+    by_key = {clip_key(c): c for c in clips}
+    for c in clips:
+        by_key[c["id"]] = c
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):  # noqa: A003 -- quiet; progress is in the page
             pass
@@ -1139,9 +1143,15 @@ def make_handler(args, dataset: Dataset, clips, saved):
                     "application/json; charset=utf-8",
                 )
             if route.startswith("/api/audio/"):
-                index = int(route.rsplit("/", 1)[1])
+                target = unquote(route[len("/api/audio/") :])
+                clip = by_key.get(target)
+                if clip is None:
+                    try:
+                        clip = clips[int(target)]
+                    except (ValueError, IndexError):
+                        return self.send(404, b"clip not found", "text/plain")
                 try:
-                    data, lead = clip_wav(clips[index], dataset)
+                    data, lead = clip_wav(clip, dataset)
                 except Exception as exc:  # noqa: BLE001 -- a bad clip must not kill the server
                     return self.send(500, str(exc).encode(), "text/plain")
                 headers = {"X-Lead": f"{lead:.4f}", "Accept-Ranges": "bytes"}

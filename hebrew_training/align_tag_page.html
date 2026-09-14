@@ -76,6 +76,15 @@
  .pill{display:inline-block;padding:3px 10px;margin-right:8px;border-radius:5px;background:#252932}
  #hint{color:#767c86;margin-top:10px;line-height:1.9;font-size:12.5px}
  kbd{background:#2a2e37;border:1px solid #3a3f4a;border-radius:4px;padding:1px 5px;font-size:11.5px}
+ #sampleBadge{color:#d8a13a;font-size:12px;margin-left:auto}
+ #sampleUpload{margin:8px 0 4px}
+ .dropzone{flex:1;min-height:64px;border:2px dashed #3a3f4a;border-radius:8px;display:flex;
+   flex-direction:column;align-items:center;justify-content:center;color:#8a8f98;font-size:13px;
+   text-align:center;padding:8px;cursor:pointer;transition:border-color .15s,background .15s}
+ .dropzone small{color:#6f757f;font-size:11px;margin-top:2px}
+ .dropzone.dragover{border-color:#3d6fd6;background:#1c2330;color:#c8ccd4}
+ .dropzone.loaded{border-color:#4ec98a;color:#a8e6c4;border-style:solid}
+ #sampleErr{color:#e06c6c;font-size:12px;min-height:16px;margin-top:4px}
 </style>
 
 <div id="gate"><div class="card">
@@ -98,7 +107,21 @@
   <button id="miggo">Migrate database</button>
   <div id="migerr"></div>
 </div></div>
-<div class="top"><h1>Hebrew alignment tagging</h1><div id="bar"></div><div id="me"></div></div>
+<div class="top"><h1>Hebrew alignment tagging</h1><div id="bar"></div><div id="me"></div>
+  <span id="sampleBadge" style="display:none">viewing local sample</span>
+  <button id="uploadSampleBtn" title="Load a local CSV + WAV pair for viewing, no server involved">upload sample</button>
+  <button id="removeSampleBtn" style="display:none">remove sample</button>
+</div>
+
+<div id="sampleUpload" style="display:none">
+  <div class="row">
+    <div id="csvDrop" class="dropzone" tabindex="0">Drop CSV file here<small>Word,Start_Time,End_Time</small></div>
+    <div id="wavDrop" class="dropzone" tabindex="0">Drop WAV file here<small>audio for the CSV above</small></div>
+    <input id="csvPick" type="file" accept=".csv,text/csv" style="display:none">
+    <input id="wavPick" type="file" accept=".wav,audio/wav,audio/x-wav" style="display:none">
+  </div>
+  <div id="sampleErr"></div>
+</div>
 
 <div class="lab">whole clip &mdash; click or drag to move the playhead
   <span class="legend">
@@ -167,6 +190,7 @@
 <div class="row">
   <span class="tag">move</span>
   <button id="fit">fit word</button><button id="fitall">fit all words</button><button id="prevw">&larr; prev word</button><button id="nextw">next word &rarr;</button>
+  <span id="clipActions" class="row-inline">
   <div class="sep"></div>
   <button id="prevc">&larr; prev clip</button>
   <button id="saveonly">save</button>
@@ -174,6 +198,7 @@
   <button id="skip">skip clip</button>
   <div class="sep"></div>
   <a id="dl" href="/api/export" download="gold.jsonl">download all marks</a>
+  </span>
 </div>
 
 <div id="hint">
@@ -205,6 +230,7 @@ function api(path){
   return s?path+'?'+s:path;
 }
 let clips=[],ci=0,wi=0,edge='end',gold=[],touched=new Set();
+let sampleMode=false,sampleCsv=null,sampleWav=null;
 let buf=null,lead=0,ctx=null,peaks=null;
 let playing=false,head=0,loopKind=null,rate=1,seg=null;
 const MARGIN=0.35;                    // seconds of context shown either side of the word
@@ -316,7 +342,7 @@ async function loadClip(){
   touched=new Set(c.saved?gold.map((_,i)=>i):[]);
   wi=0; edge='end'; head=0;
   specCanvas=null; snapPoints=[];
-  const r=await fetch(api('/api/audio/'+ci)); lead=parseFloat(r.headers.get('X-Lead')||'0');
+  const r=await fetch(api('/api/audio/'+encodeURIComponent(c.key||c.id||ci))); lead=parseFloat(r.headers.get('X-Lead')||'0');
   const ab=await r.arrayBuffer();
   ctx=ctx||new (window.AudioContext||window.webkitAudioContext)();
   buf=await ctx.decodeAudioData(ab);
@@ -1040,9 +1066,12 @@ function buildWords(){
 }
 
 function render(){
-  const c=clips[ci];
-  $('bar').innerHTML='clip '+(ci+1)+'/'+clips.length+' &nbsp;·&nbsp; word '+(wi+1)+'/'+gold.length
-    +' &nbsp;·&nbsp; <span id="done">'+clips.filter(x=>x.saved).length+' saved</span>';
+  if(sampleMode){
+    $('bar').innerHTML='local sample &nbsp;·&nbsp; word '+(wi+1)+'/'+gold.length;
+  }else{
+    $('bar').innerHTML='clip '+(ci+1)+'/'+clips.length+' &nbsp;·&nbsp; word '+(wi+1)+'/'+gold.length
+      +' &nbsp;·&nbsp; <span id="done">'+clips.filter(x=>x.saved).length+' saved</span>';
+  }
   if(chips.length!==gold.length || !chips.every(c=>c.parentNode)) buildWords();
   gold.forEach((wd,i)=>{const s=chips[i];
     s.textContent=wd.word;
@@ -1406,9 +1435,106 @@ $('saveonly').onclick=save;
 $('save').onclick=saveNext;
 $('skip').onclick=()=>{if(ci<clips.length-1){ci++;loadClip();}};
 
+// ---- experimental: view a local CSV+WAV sample, no server involved --------
+// A drag-in preview: the CSV supplies word boundaries, the WAV supplies audio, and both
+// are decoded entirely client-side. `save`/`saveNext` already no-op under sampleMode, so
+// every edit made while inspecting a sample stays in memory and is never sent anywhere.
+function setClipActionsVisible(v){ $('clipActions').style.display=v?'inline-flex':'none'; }
+function parseSampleCsv(text){
+  const lines=text.split(/\r\n|\n|\r/).map(l=>l.trim()).filter(l=>l.length);
+  if(!lines.length) throw new Error('file is empty');
+  let start=0;
+  const head=lines[0].split(',').map(s=>s.trim().toLowerCase());
+  if(head[0]==='word'&&head.length>=3) start=1;         // an optional header row
+  const words=[];
+  for(let i=start;i<lines.length;i++){
+    const parts=lines[i].split(',');
+    if(parts.length<3) throw new Error('row '+(i+1)+' is not Word,Start_Time,End_Time');
+    const word=parts[0].trim(), s=parseFloat(parts[1]), e=parseFloat(parts[2]);
+    if(!word) throw new Error('row '+(i+1)+' has no word');
+    if(!isFinite(s)||!isFinite(e)) throw new Error('row '+(i+1)+' has a non-numeric time');
+    if(e<=s) throw new Error('row '+(i+1)+': End_Time must be after Start_Time');
+    words.push({word,start:s,end:e});
+  }
+  if(!words.length) throw new Error('no data rows found');
+  return words;
+}
+const readAsText=file=>new Promise((res,rej)=>{
+  const r=new FileReader(); r.onload=()=>res(r.result); r.onerror=()=>rej(r.error); r.readAsText(file);});
+const readAsArrayBuffer=file=>new Promise((res,rej)=>{
+  const r=new FileReader(); r.onload=()=>res(r.result); r.onerror=()=>rej(r.error); r.readAsArrayBuffer(file);});
+async function tryLoadSample(){
+  if(!sampleCsv||!sampleWav) return;             // wait for both drops before doing anything
+  $('sampleErr').textContent='';
+  try{
+    const words=parseSampleCsv(sampleCsv.text);
+    ctx=ctx||new (window.AudioContext||window.webkitAudioContext)();
+    const decoded=await ctx.decodeAudioData(sampleWav.buf.slice(0));
+    stop();
+    sampleMode=true;
+    gold=words; touched=new Set();
+    wi=0; edge='end'; head=0; lead=0;              // local wav has no server-side pre-roll
+    buf=decoded; specCanvas=buildMelSpec(buf); snapPoints=specCanvas?(specCanvas.snapPoints||[]):[];
+    peaks=null; view=null; stretchCache.clear();
+    $('sampleUpload').style.display='none';
+    $('uploadSampleBtn').style.display='none';
+    $('removeSampleBtn').style.display='';
+    $('sampleBadge').style.display='';
+    setClipActionsVisible(false);
+    draw(); render();
+  }catch(err){
+    $('sampleErr').textContent='Could not load sample: '+err.message;
+  }
+}
+function resetDropzone(el,label){ el.classList.remove('loaded'); el.innerHTML=label; }
+const CSV_LABEL='Drop CSV file here<small>Word,Start_Time,End_Time</small>';
+const WAV_LABEL='Drop WAV file here<small>audio for the CSV above</small>';
+function wireDrop(zone,picker,onFile){
+  zone.addEventListener('dragover',e=>{e.preventDefault();zone.classList.add('dragover');});
+  zone.addEventListener('dragleave',()=>zone.classList.remove('dragover'));
+  zone.addEventListener('drop',e=>{
+    e.preventDefault(); zone.classList.remove('dragover');
+    const f=e.dataTransfer.files&&e.dataTransfer.files[0];
+    if(f) onFile(f);
+  });
+  zone.addEventListener('click',()=>picker.click());
+  picker.addEventListener('change',()=>{ if(picker.files[0]) onFile(picker.files[0]); picker.value=''; });
+}
+wireDrop($('csvDrop'),$('csvPick'),async f=>{
+  try{
+    sampleCsv={name:f.name,text:await readAsText(f)};
+    $('csvDrop').classList.add('loaded'); $('csvDrop').innerHTML='&#10003; '+f.name;
+    await tryLoadSample();
+  }catch(err){ $('sampleErr').textContent='Could not read CSV: '+err.message; }
+});
+wireDrop($('wavDrop'),$('wavPick'),async f=>{
+  try{
+    sampleWav={name:f.name,buf:await readAsArrayBuffer(f)};
+    $('wavDrop').classList.add('loaded'); $('wavDrop').innerHTML='&#10003; '+f.name;
+    await tryLoadSample();
+  }catch(err){ $('sampleErr').textContent='Could not read WAV: '+err.message; }
+});
+$('uploadSampleBtn').onclick=()=>{
+  $('sampleUpload').style.display='block';
+  $('uploadSampleBtn').style.display='none';
+};
+$('removeSampleBtn').onclick=async ()=>{
+  stop();
+  sampleMode=false; sampleCsv=null; sampleWav=null;
+  resetDropzone($('csvDrop'),CSV_LABEL); resetDropzone($('wavDrop'),WAV_LABEL);
+  $('sampleErr').textContent='';
+  $('sampleUpload').style.display='none';
+  $('removeSampleBtn').style.display='none';
+  $('sampleBadge').style.display='none';
+  $('uploadSampleBtn').style.display='';
+  setClipActionsVisible(true);
+  if(clips.length) await loadClip(); else draw();   // back to the normal tagging queue
+};
+
 // Persist without advancing: a text correction is worth keeping the moment it is made,
 // even on a clip whose boundaries are not finished.
 async function save(){
+  if(sampleMode){ render(); return; }   // a local sample is view-only: never tag, never call the server
   await fetch(api('/api/gold'),{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({index:ci,key:clips[ci].key,words:gold,next:false})});
   clips[ci].saved=gold.map(w=>({...w}));
@@ -1416,6 +1542,7 @@ async function save(){
 }
 
 async function saveNext(){
+  if(sampleMode){ render(); return; }
   await fetch(api('/api/gold'),{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({index:ci,key:clips[ci].key,words:gold,next:true})});
   clips[ci].saved=gold.map(w=>({...w}));
@@ -1450,7 +1577,7 @@ addEventListener('keydown',async e=>{
   if(e.key==='Enter'){e.preventDefault();
     if(e.ctrlKey||e.metaKey) await saveNext(); else await save(); return;}
   if(e.key==='s'){if(e.ctrlKey||e.metaKey){e.preventDefault();await save();return;}
-    if(ci<clips.length-1){ci++;await loadClip();}return;}
+    if(!sampleMode&&ci<clips.length-1){ci++;await loadClip();}return;}
 });
 addEventListener('resize',()=>{peaks=null;draw();});
 boot();
