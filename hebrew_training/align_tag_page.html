@@ -63,7 +63,7 @@
   #savedLink:hover{color:#c8ccd4}
  #me{color:#6f757f;font-size:12px;margin-left:auto}
  #ov{display:block;width:100%;height:90px;background:#1c1f25;border-radius:6px;cursor:pointer}
- #wave{display:block;width:100%;height:85px;background:#1c1f25;border-radius:6px;margin-bottom:3px;cursor:grab}
+ #wave{display:block;width:100%;height:85px;background:#000;border-radius:6px;margin-bottom:3px;cursor:grab}
  #wave.grabbing{cursor:grabbing}
  #wave.onmark{cursor:ew-resize}
  #zm{display:block;width:100%;height:215px;background:#1c1f25;border-radius:6px;cursor:grab}
@@ -962,7 +962,7 @@ function drawWave(){
 
   // waveform samples
   const d=buf.getChannelData(0), sr=buf.sampleRate;
-  wg.fillStyle='#39404d';
+  wg.fillStyle='#70b5ff';
   for(let x=0; x<w; x++){
     const a=lo+(x/w)*(hi-lo), b=lo+((x+1)/w)*(hi-lo);
     const s=Math.floor((a+lead)*sr), e=Math.floor((b+lead)*sr);
@@ -1041,11 +1041,16 @@ function drawZoom(){
     }
   }
 
-  // 2. Word span backgrounds
+  // 2. Word span backgrounds (mid 40% of the bar) with top/bottom 1px 50% white borders
+  const yTop = h * 0.30, hSpan = h * 0.40;
   gold.forEach((wd,i)=>{
-    zg.fillStyle=(i===wi)?'rgba(61,111,214,.18)'
-      : modified(i)?'rgba(78,201,138,.07)':'rgba(255,255,255,.035)';
-    zg.fillRect(X(wd.start),0,Math.max(1,X(wd.end)-X(wd.start)),h);
+    const x0 = X(wd.start), wSpan = Math.max(1, X(wd.end) - x0);
+    zg.fillStyle = (i===wi)?'rgba(61,111,214,.38)'
+      : modified(i)?'rgba(78,201,138,.24)':'rgba(255,255,255,.20)';
+    zg.fillRect(x0, yTop, wSpan, hSpan);
+    zg.fillStyle = 'rgba(255,255,255,0.5)';
+    zg.fillRect(x0, yTop, wSpan, 1);
+    zg.fillRect(x0, yTop + hSpan - 1, wSpan, 1);
   });
 
   // 3. Time ticks at bottom
@@ -1076,48 +1081,50 @@ function drawZoom(){
   zg.fillText((maxHz / 1000).toFixed(maxHz % 1000 ? 1 : 0) + ' kHz', 3, 10);
   zg.fillText('0 Hz', 3, h - 3);
 
-  // 5. Snap points (green lines) - drawn under word marks, lighter green
+  // 5. Snap points (green lines) - 50% high from the bottom, 50% transparent
   if(snapShow&&snapPoints&&snapPoints.length){
     zg.fillStyle='#86efac';
     snapPoints.forEach(t=>{
-      if(t>=lo&&t<=hi) zg.fillRect(Math.round(X(t)),0,1,h);
+      if(t>=lo&&t<=hi) zg.fillRect(Math.round(X(t)),h*0.70,1,h*0.30);
     });
   }
 
-  // 6. Non-active word marks (grey) - on top of green lines
+  // 6. Non-active word marks (grey) - overlay height (mid 40% centered)
   gold.forEach((wd,i)=>{
     if(i===wi) return;
     [['start',wd.start],['end',wd.end]].forEach(([which,t])=>{
       if(X(t)<-4||X(t)>w+4) return;
       zg.fillStyle='#4a5872';
-      zg.fillRect(Math.round(X(t)),0,1,h);
+      zg.fillRect(Math.round(X(t)),yTop,1,hSpan);
     });
   });
 
-  // 7. Active word marks (blue) - on top of green lines and grey marks
+  // 7. Active word marks (blue) - overlay height (mid 40% centered)
   if(gold[wi]){
     const wd=gold[wi];
     [['start',wd.start],['end',wd.end]].forEach(([which,t])=>{
       if(X(t)<-4||X(t)>w+4) return;
       const on=(which===edge);
       zg.fillStyle='#6aa0ff';
-      zg.fillRect(X(t)-(on?2:0),0,on?4:2,h);
+      zg.fillRect(X(t)-(on?2:0),yTop,on?4:2,hSpan);
     });
   }
 
-  // 8. Word text labels - white with shadow, active word bold, other words normal
+  // 8. Word text labels - white with shadow, centered vertically and horizontally in the word segment
   zg.shadowColor='rgba(0,0,0,0.85)';
   zg.shadowBlur=3;
+  zg.textAlign='center';
+  zg.textBaseline='middle';
   gold.forEach((wd,i)=>{
     const cur=(i===wi);
     const mid=(X(wd.start)+X(wd.end))/2;
     if(mid>-40&&mid<w+40){
       zg.font=(cur?'bold 13px':'normal 12px')+' system-ui';
       zg.fillStyle='#ffffff';
-      zg.textAlign='center';
-      zg.fillText(wd.word,mid,18);
+      zg.fillText(wd.word,mid,h*0.50);
     }
   });
+  zg.textBaseline='alphabetic';
 
   // 9. Active edge label (START / END)
   zg.font='bold 11px system-ui';
@@ -1554,66 +1561,69 @@ function attachZoomEvents(canvas){
         removeEventListener('mousemove',mv);removeEventListener('mouseup',up);};
       addEventListener('mousemove',mv); addEventListener('mouseup',up); return;
     }
-    // nearest mark across ALL words, so any of them can be grabbed without switching first
-    let best=null;
-    gold.forEach((wd,i)=>{
-      [['start',wd.start],['end',wd.end]].forEach(([which,t])=>{
-        const d=Math.abs(px(t)-e.clientX);
-        if(!best||d<best.d) best={d,i,which};
+    const inOverlayZone = (canvas !== zm) || (e.clientY >= r.top + r.height * 0.30 && e.clientY <= r.top + r.height * 0.70);
+    if(inOverlayZone){
+      // nearest mark across ALL words, so any of them can be grabbed without switching first
+      let best=null;
+      gold.forEach((wd,i)=>{
+        [['start',wd.start],['end',wd.end]].forEach(([which,t])=>{
+          const d=Math.abs(px(t)-e.clientX);
+          if(!best||d<best.d) best={d,i,which};
+        });
       });
-    });
-    // inside a word, away from its marks: drag the whole word, both marks together
-    if(!(best&&best.d<9)){
-      const t=at(e.clientX);
-      const inside=gold.findIndex(wd=>t>wd.start&&t<wd.end);
-      if(inside>=0){
-        wi=inside; render();
-        const w=gold[wi], len=w.end-w.start, grab=t-w.start, downX=e.clientX;
-        let moved=false;
-        const mv=ev=>{
-          if(!moved){ if(Math.abs(ev.clientX-downX)<=3) return;
-            moved=true; dragging=true; canvas.classList.add('grabbing'); }
-          let a=at(ev.clientX)-grab;
-          const lo=(wi>0)?gold[wi-1].end:tmin();
-          const hi=(wi<gold.length-1)?gold[wi+1].start:total();
-          a=Math.max(lo,Math.min(a,hi-len));
-          w.start=a; w.end=a+len; touched.add(wi); draw(); render();
-          if(loopKind){const sp=loopSpan(); start(sp[0],sp[1]);}
-          else scheduleWordPlay();
-        };
-        const up=()=>{ if(!moved) moveHead(t);
-          dragging=false; canvas.classList.remove('grabbing');
-          removeEventListener('mousemove',mv); removeEventListener('mouseup',up);};
+      // inside a word, away from its marks: drag the whole word, both marks together
+      if(!(best&&best.d<9)){
+        const t=at(e.clientX);
+        const inside=gold.findIndex(wd=>t>wd.start&&t<wd.end);
+        if(inside>=0){
+          wi=inside; render();
+          const w=gold[wi], len=w.end-w.start, grab=t-w.start, downX=e.clientX;
+          let moved=false;
+          const mv=ev=>{
+            if(!moved){ if(Math.abs(ev.clientX-downX)<=3) return;
+              moved=true; dragging=true; canvas.classList.add('grabbing'); }
+            let a=at(ev.clientX)-grab;
+            const lo=(wi>0)?gold[wi-1].end:tmin();
+            const hi=(wi<gold.length-1)?gold[wi+1].start:total();
+            a=Math.max(lo,Math.min(a,hi-len));
+            w.start=a; w.end=a+len; touched.add(wi); draw(); render();
+            if(loopKind){const sp=loopSpan(); start(sp[0],sp[1]);}
+            else scheduleWordPlay();
+          };
+          const up=()=>{ if(!moved) moveHead(t);
+            dragging=false; canvas.classList.remove('grabbing');
+            removeEventListener('mousemove',mv); removeEventListener('mouseup',up);};
+          addEventListener('mousemove',mv); addEventListener('mouseup',up); return;
+        }
+      }
+      if(best&&best.d<9){                          // grabbed a mark: drag it (mouse never snaps)
+        wi=best.i; const which=best.which; edge=which; dragging=true; render();
+        canvas.classList.add('grabbing');
+        let last=e.clientX;
+        setMark(at(e.clientX),which);
+        const mv=ev=>{ last=ev.clientX; setMark(at(ev.clientX),which); };
+        const timer=setInterval(()=>{
+          const [lo,hi]=zwin(), span=hi-lo;
+          if(last<r.left+6){ panBy(-span*0.05); setMark(mark()-span*0.05,which); }
+          else if(last>r.right-6){ panBy(span*0.05); setMark(mark()+span*0.05,which); }
+        },50);
+        const up=()=>{clearInterval(timer); dragging=false; canvas.classList.remove('grabbing');
+          removeEventListener('mousemove',mv);removeEventListener('mouseup',up);};
         addEventListener('mousemove',mv); addEventListener('mouseup',up); return;
       }
     }
-    if(best&&best.d<9){                          // grabbed a mark: drag it (mouse never snaps)
-      wi=best.i; const which=best.which; edge=which; dragging=true; render();
-      canvas.classList.add('grabbing');
-      let last=e.clientX;
-      setMark(at(e.clientX),which);
-      const mv=ev=>{ last=ev.clientX; setMark(at(ev.clientX),which); };
-      const timer=setInterval(()=>{
-        const [lo,hi]=zwin(), span=hi-lo;
-        if(last<r.left+6){ panBy(-span*0.05); setMark(mark()-span*0.05,which); }
-        else if(last>r.right-6){ panBy(span*0.05); setMark(mark()+span*0.05,which); }
-      },50);
-      const up=()=>{clearInterval(timer); dragging=false; canvas.classList.remove('grabbing');
-        removeEventListener('mousemove',mv);removeEventListener('mouseup',up);};
-      addEventListener('mousemove',mv); addEventListener('mouseup',up); return;
-    }
-    // Not on a mark: drag to pan the view, or click without dragging to move the playhead.
+    // Outside word overlays or marks: drag to pan/scroll the view, or click without dragging to move the playhead.
     const t0x=e.clientX, tAtDown=at(e.clientX); let moved=false;
     let prev=t0x;
     const mv2=ev=>{
-      if(Math.abs(ev.clientX-t0x)>3) moved=true;
+      if(Math.abs(ev.clientX-t0x)>3){ moved=true; dragging=true; }
       if(!moved){prev=ev.clientX; return;}
       const [lo,hi]=zwin();
       panBy(-(ev.clientX-prev)/r.width*(hi-lo));
       prev=ev.clientX;
     };
     canvas.classList.add('grabbing');
-    const up=()=>{ canvas.classList.remove('grabbing'); if(!moved) moveHead(tAtDown);
+    const up=()=>{ canvas.classList.remove('grabbing'); dragging=false; if(!moved) moveHead(tAtDown);
       removeEventListener('mousemove',mv2); removeEventListener('mouseup',up); };
     addEventListener('mousemove',mv2); addEventListener('mouseup',up);
   };
@@ -1622,7 +1632,10 @@ function attachZoomEvents(canvas){
     const r=canvas.getBoundingClientRect(),[lo,hi]=zwin();
     const px=t=>(t-lo)/(hi-lo)*r.width+r.left;
     let near=(e.clientY<=r.top+r.height*0.20)?Math.abs(px(now())-e.clientX):999;
-    gold.forEach(wd=>{ near=Math.min(near,Math.abs(px(wd.start)-e.clientX),Math.abs(px(wd.end)-e.clientX)); });
+    const inOverlay=(canvas!==zm)||(e.clientY>=r.top+r.height*0.30&&e.clientY<=r.top+r.height*0.70);
+    if(inOverlay){
+      gold.forEach(wd=>{ near=Math.min(near,Math.abs(px(wd.start)-e.clientX),Math.abs(px(wd.end)-e.clientX)); });
+    }
     canvas.classList.toggle('onmark',near<9);
   });
   canvas.addEventListener('wheel',e=>{
