@@ -1397,50 +1397,91 @@ function untangleWords(){
   if(!gold||gold.length<=1) return;
   if(!confirm("Untangle words will change any overlapping word timings regardless of original values. Continue?")) return;
 
-  // Words are kept in text order (as they appear in the labels / gold array).
-  // Identify overlapping or out-of-order groups along the text order sequence.
-  const EPS=1e-5;
-  const groups=gold.map(w=>({
-    words:[w],
-    start:w.start,
-    end:w.end
+  const MIN_LEN = 0.020;  // 20ms minimal word length
+  const EPS = 1e-4;
+  const minAudio = (typeof tmin === 'function') ? tmin() : 0;
+  const maxAudio = (typeof total === 'function' && total() > minAudio) ? total() : Infinity;
+
+  let changed = false;
+
+  // 1. Sanitize every word: ensure valid numeric values, end > start, and min duration
+  for (let i = 0; i < gold.length; i++) {
+    let s = Number(gold[i].start);
+    let e = Number(gold[i].end);
+    if (isNaN(s) || !isFinite(s)) s = minAudio;
+    if (isNaN(e) || !isFinite(e)) e = s + MIN_LEN;
+    if (e < s) { const tmp = s; s = e; e = tmp; changed = true; }
+    if (e - s < MIN_LEN) { e = s + MIN_LEN; changed = true; }
+    if (gold[i].start !== s || gold[i].end !== e) changed = true;
+    gold[i].start = s;
+    gold[i].end = e;
+  }
+
+  // 2. Cluster overlapping and out-of-order words along sentence order
+  const groups = gold.map(w => ({
+    words: [w],
+    start: w.start,
+    end: Math.max(w.end, w.start + MIN_LEN)
   }));
 
-  const merged=[];
-  for(const g of groups){
-    let cur=g;
-    while(merged.length>0){
-      const prev=merged[merged.length-1];
-      if(cur.start<prev.end-EPS){
+  const merged = [];
+  for (const g of groups) {
+    let cur = g;
+    while (merged.length > 0) {
+      const prev = merged[merged.length - 1];
+      if (cur.start < prev.end - EPS) {
         merged.pop();
-        cur={
-          words:prev.words.concat(cur.words),
-          start:Math.min(prev.start,cur.start),
-          end:Math.max(prev.end,cur.end)
+        const totalWords = prev.words.length + cur.words.length;
+        const minS = Math.min(prev.start, cur.start);
+        const maxE = Math.max(prev.end, cur.end, minS + totalWords * MIN_LEN);
+        cur = {
+          words: prev.words.concat(cur.words),
+          start: minS,
+          end: maxE
         };
-      }else{
+      } else {
         break;
       }
     }
     merged.push(cur);
   }
 
-  // Untangle groups: each overlapping group splits its shared space into equal parts among its words in text order
-  let changed=false;
-  for(const g of merged){
-    if(g.words.length>1){
-      changed=true;
-      const span=Math.max(0,g.end-g.start);
-      const step=span/g.words.length;
-      for(let k=0;k<g.words.length;k++){
-        g.words[k].start=g.start+k*step;
-        g.words[k].end=(k===g.words.length-1)?g.end:(g.start+(k+1)*step);
+  // 3. Shift backwards from audio ceiling if needed, merging backwards if pushed into previous group
+  if (isFinite(maxAudio)) {
+    for (let i = merged.length - 1; i >= 0; i--) {
+      const g = merged[i];
+      if (g.end > maxAudio) {
+        const diff = g.end - maxAudio;
+        g.end = maxAudio;
+        g.start = Math.max(minAudio, g.start - diff);
+        if (i > 0 && g.start < merged[i - 1].end - EPS) {
+          const prev = merged[i - 1];
+          merged.splice(i - 1, 2, {
+            words: prev.words.concat(g.words),
+            start: Math.min(prev.start, g.start),
+            end: Math.max(prev.end, g.end)
+          });
+          i = merged.length;
+        }
       }
     }
   }
 
-  if(changed){
-    gold.forEach((_,i)=>touched.add(i));
+  // 4. Untangle each multi-word group: split shared space equally among words in sentence order
+  for (const g of merged) {
+    if (g.words.length > 1) {
+      changed = true;
+      const span = Math.max(g.words.length * MIN_LEN, g.end - g.start);
+      const step = span / g.words.length;
+      for (let k = 0; k < g.words.length; k++) {
+        g.words[k].start = g.start + k * step;
+        g.words[k].end = (k === g.words.length - 1) ? g.end : (g.start + (k + 1) * step);
+      }
+    }
+  }
+
+  if (changed) {
+    gold.forEach((_, i) => touched.add(i));
     save();
   }
 
