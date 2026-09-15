@@ -36,8 +36,31 @@
  #mgate p{color:#8a8f98;line-height:1.5;margin:0 0 16px}
  #mgate button{margin-top:12px;width:100%;font:600 14px system-ui,sans-serif;padding:9px;
                border:0;border-radius:6px;background:#2b6b46;color:#fff;cursor:pointer}
- #mgate button:disabled{opacity:.5;cursor:default}
- #migerr{color:#e06c6c;font-size:12px;min-height:16px;margin-top:8px}
+  #mgate button:disabled{opacity:.5;cursor:default}
+  #migerr{color:#e06c6c;font-size:12px;min-height:16px;margin-top:8px}
+  #savedlist{position:fixed;inset:0;background:#14161a;display:none;align-items:center;
+        justify-content:center;z-index:60}
+  #savedlist.on{display:flex}
+  #savedlist .card{background:#1c1f25;border-radius:10px;padding:26px 28px;max-width:540px;
+        width:540px;max-height:80vh;display:flex;flex-direction:column}
+  #savedlist h2{font-size:16px;margin:0 0 10px}
+  #savedlist p{color:#8a8f98;font-size:13px;margin:8px 0}
+  .savedItems{overflow:auto;flex:1;margin:0 0 14px}
+  .savedItem{display:flex;align-items:center;gap:10px;background:#252932;border-radius:6px;
+        padding:8px 11px;margin:5px 0;cursor:pointer;font-size:13px;color:#c8ccd4}
+  .savedItem:hover{background:#2e333d}
+  .savedItem.cur{outline:1px solid #3d6fd6}
+  .savedIdx{color:#6f757f;font-size:12px;white-space:nowrap}
+  .savedText{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+        direction:rtl;text-align:right;unicode-bidi:plaintext}
+  .savedBadge{font-size:11px;padding:2px 7px;border-radius:10px;white-space:nowrap;color:#6f757f;border:1px solid #3a3f4a}
+  .savedBadge.on{color:#d8a13a;border-color:#d8a13a}
+  .savedBadge.done.on{color:#4ec98a;border-color:#4ec98a}
+  #savedClose{background:#2a2e37;color:#e8e8ea;border:1px solid #3a3f4a;border-radius:6px;
+        padding:7px 12px;font:14px system-ui;cursor:pointer}
+  #savedClose:hover{background:#363c47}
+  #savedLink{color:#8a8f98;cursor:pointer;text-decoration:underline dotted}
+  #savedLink:hover{color:#c8ccd4}
  #me{color:#6f757f;font-size:12px;margin-left:auto}
  #ov{display:block;width:100%;height:90px;background:#1c1f25;border-radius:6px;cursor:pointer}
  #wave{display:block;width:100%;height:85px;background:#1c1f25;border-radius:6px;margin-bottom:3px;cursor:grab}
@@ -55,6 +78,8 @@
  button{background:#2a2e37;color:#e8e8ea;border:1px solid #3a3f4a;border-radius:6px;
         padding:7px 12px;font:14px system-ui;cursor:pointer}
  button:hover{background:#363c47}
+  button:disabled{opacity:.45;cursor:default}
+  button:disabled:hover{background:#2a2e37}
  button.on{background:#3d6fd6;border-color:#3d6fd6;color:#fff}
  button.go{background:#2b6b46;border-color:#2b6b46;color:#fff;font-weight:600}
  select{background:#2a2e37;color:#e8e8ea;border:1px solid #3a3f4a;border-radius:6px;padding:6px}
@@ -74,8 +99,15 @@
  .w.playing{border:2px solid #d8a13a}
  #cmp{margin:6px 0;font-variant-numeric:tabular-nums;font-size:13px}
  .pill{display:inline-block;padding:3px 10px;margin-right:8px;border-radius:5px;background:#252932}
- #hint{color:#767c86;margin-top:10px;line-height:1.9;font-size:12.5px}
- kbd{background:#2a2e37;border:1px solid #3a3f4a;border-radius:4px;padding:1px 5px;font-size:11.5px}
+#hint{color:#767c86;margin-top:10px;line-height:1.9;font-size:12.5px}
+  #hint h3{font-size:12px;color:#9aa0aa;margin:16px 0 4px;text-transform:uppercase;letter-spacing:.5px}
+  #hint h3:first-child{margin-top:0}
+  #hint p{margin:4px 0}
+  #hint ul{margin:4px 0;padding-left:18px}
+  .hintcols{display:flex;flex-wrap:wrap;gap:6px 30px}
+  .hintcol{min-width:230px}
+  .hintcol b{display:block;color:#c8ccd4;font-size:12px;margin-bottom:2px}
+  kbd{background:#2a2e37;border:1px solid #3a3f4a;border-radius:4px;padding:1px 5px;font-size:11.5px}
  #sampleBadge{color:#d8a13a;font-size:12px;margin-left:auto}
  #sampleUpload{margin:8px 0 4px}
  .dropzone{flex:1;min-height:64px;border:2px dashed #3a3f4a;border-radius:8px;display:flex;
@@ -106,6 +138,12 @@
      existing marks into the new format &mdash; nothing is deleted &mdash; then reload the page.</p>
   <button id="miggo">Migrate database</button>
   <div id="migerr"></div>
+</div></div>
+<div id="savedlist"><div class="card">
+  <h2>My clips <span id="savedCount"></span></h2>
+  <p>Every clip assigned to you &mdash; click one to jump to it.</p>
+  <div class="savedItems" id="savedItems"></div>
+  <button id="savedClose">close</button>
 </div></div>
 <div class="top"><h1>Hebrew alignment tagging</h1><div id="bar"></div><div id="me"></div>
   <span id="sampleBadge" style="display:none">viewing local sample</span>
@@ -142,7 +180,7 @@
 <div id="scroll"><div id="thumb"></div></div>
 
 <div class="row">
-  <span class="tag">play</span>
+  <span class="tag">listen</span>
   <button id="tostart" title="Home">&#9198; start</button>
   <button id="play" title="Space">&#9654; play</button>
   <button id="stopb" title="Escape">&#9632; stop</button>
@@ -150,8 +188,10 @@
   <button id="pbefore" title="Q">&#9654; up to mark</button>
   <button id="pword" title="W">&#9654; whole word</button>
   <button id="pafter" title="E">&#9654; after mark</button>
-  <button id="loopWord">&#8635; loop word</button>
-  <button id="loopMark">&#8635; loop across mark</button>
+  <div class="sep"></div>
+  <button id="loopWord" title="Shift+L">&#8635; loop word</button>
+  <button id="loopMark" title="L">&#8635; loop across mark</button>
+  <div class="sep"></div>
   <select id="rate">
     <option value="0.25">0.25&times;</option><option value="0.5">0.5&times;</option>
     <option value="0.75">0.75&times;</option><option value="1" selected>1.0&times;</option>
@@ -163,11 +203,11 @@
 <div id="cmp"></div>
 
 <div class="row">
-  <span class="tag">editing</span>
-  <button id="edStart">word START</button><button id="edEnd" class="on">word END</button>
+  <span class="tag">edit word</span>
+  <button id="edStart" title="double-click to type a time">word START</button><button id="edEnd" class="on" title="double-click to type a time">word END</button>
   <div class="sep"></div>
-  <button id="setb">put mark at playhead</button>
-  <button id="m5" title="Ctrl+Shift+←">&minus;5ms</button><button id="p5" title="Ctrl+Shift+→">+5ms</button>
+  <button id="setb" title="F">put mark at playhead</button>
+  <button id="m5" title="Ctrl+Shift+&larr;">&minus;5ms</button><button id="p5" title="Ctrl+Shift+&rarr;">+5ms</button>
   <div class="sep"></div>
   <button id="addw">+ add word after</button>
   <button id="delw" class="danger">&times; delete word</button>
@@ -177,7 +217,7 @@
   <label class="chk"><input type="checkbox" id="playMark" checked> play word on mark change</label>
 </div>
 <div class="row" id="snapRow">
-  <span class="tag">snaps</span>
+  <span class="tag">segmentation</span>
   <label class="chk" style="margin-left:0;margin-right:6px">
     <input type="checkbox" id="snapShow"> show speech segmentation lines
   </label>
@@ -191,33 +231,102 @@
   </span>
 </div>
 <div class="row">
-  <span class="tag">move</span>
-  <button id="fit">fit word</button><button id="fitall">fit all words</button><button id="prevw">&larr; prev word</button><button id="nextw">next word &rarr;</button>
-  <span id="clipActions" class="row-inline">
+  <span class="tag">navigate</span>
+  <button id="fit" title="Fit the view to the current word">fit word</button>
+  <button id="fitall" title="Fit the view to all words">fit all words</button>
   <div class="sep"></div>
-  <button id="prevc">&larr; prev clip</button>
-  <button id="saveonly">save</button>
-  <button id="save" class="go">save &amp; next clip</button>
-  <button id="skip">skip clip</button>
+  <button id="prevw" title="Shift+Tab">&larr; prev word</button>
+  <button id="nextw" title="Tab">next word &rarr;</button>
+  <span id="clipNav" class="row-inline">
+    <div class="sep"></div>
+    <button id="prevc">&larr; prev clip</button>
+    <button id="skip">skip clip</button>
+  </span>
+</div>
+<div class="row" id="saveRow">
+  <span class="tag">save &amp; done</span>
+  <button id="saveonly" title="Enter / Ctrl+S">save</button>
+  <button id="save" class="go" title="Ctrl+Enter">done &amp; next clip</button>
+  <button id="unmark" title="Mark this clip as still in progress">unmark as done</button>
   <div class="sep"></div>
   <a id="dl" href="/api/export" download="gold.jsonl">download all marks</a>
-  </span>
 </div>
 
 <div id="hint">
-<kbd>space</kbd> play / pause &nbsp; <kbd>esc</kbd> stop &nbsp; <kbd>q</kbd> hear up to the mark &nbsp;
-<kbd>w</kbd> the word &nbsp; <kbd>e</kbd> hear after the mark &nbsp;
-<kbd>&larr;</kbd><kbd>&rarr;</kbd> move through marks &nbsp; <kbd>tab</kbd> next word (start) &middot; <kbd>shift+tab</kbd> prev word (end) &nbsp;
-<kbd>f</kbd> put mark at playhead &nbsp;
-<kbd>l</kbd> loop across the mark &nbsp; <kbd>shift+l</kbd> loop the word &nbsp;
-<kbd>ctrl</kbd>+<kbd>shift</kbd>+<kbd>&larr;</kbd><kbd>&rarr;</kbd> nudge 5ms &middot; <kbd>shift</kbd>+<kbd>&larr;</kbd><kbd>&rarr;</kbd> nudge 25ms &middot; <kbd>shift</kbd>+<kbd>&uarr;</kbd><kbd>&darr;</kbd> nudge 125ms &nbsp;
-<kbd>enter</kbd> save &middot; <kbd>ctrl+enter</kbd> save &amp; next &middot; <kbd>ctrl+s</kbd> save
-<br><b>Wrong word?</b> Double-click it to retype, or clear the box to delete it. Use
-<b>+ add word after</b> for one the transcript missed.<br>
-<b>Corrected words</b> are outlined amber, <b>added</b> ones green. Double-click to retype. The original is kept, and the word is outlined in amber.<br>
-<b>Double-click</b> the <b>start</b> or <b>end</b> label in the info bar (or the buttons) to manually enter timings (may create overlaps). Use <b>untangle words</b> to fix overlaps, or <b>reset to baseline</b> to restore original dataset words and timings.<br>
-<b>In the lower panel:</b> drag a blue line to move it, or drag the red playhead to scrub. Click anywhere else to move the
-playhead, and <b>drag empty space to slide the view</b>. <b>Wheel zooms</b>, shift+wheel scrolls, the bar under the panel scrolls left and right, &ldquo;fit word&rdquo; snaps to the current word and &ldquo;fit all words&rdquo; shows the whole sentence. <b>Every word's marks are drawn</b> &mdash; drag any of them and that word becomes current, or <b>drag the middle of a word to slide the whole tag</b>.
+<h3>Keyboard shortcuts</h3>
+<div class="hintcols">
+  <div class="hintcol">
+    <b>Listen</b>
+    <kbd>space</kbd> play / pause &nbsp;
+    <kbd>esc</kbd> stop &nbsp;
+    <kbd>home</kbd> back to start<br>
+    <kbd>q</kbd> hear up to the mark &nbsp;
+    <kbd>w</kbd> hear the word &nbsp;
+    <kbd>e</kbd> hear after the mark<br>
+    <kbd>l</kbd> loop across the mark &nbsp;
+    <kbd>shift+l</kbd> loop the word
+  </div>
+  <div class="hintcol">
+    <b>Navigate</b>
+    <kbd>&larr;</kbd><kbd>&rarr;</kbd> move through marks<br>
+    <kbd>tab</kbd> next word &nbsp;
+    <kbd>shift+tab</kbd> previous word<br>
+    <kbd>s</kbd> next clip
+  </div>
+  <div class="hintcol">
+    <b>Edit marks</b>
+    <kbd>f</kbd> put the mark at the playhead<br>
+    <kbd>ctrl+shift+&larr;/&rarr;</kbd> nudge 5ms<br>
+    <kbd>shift+&larr;/&rarr;</kbd> nudge 25ms<br>
+    <kbd>shift+&uarr;/&darr;</kbd> nudge 125ms
+  </div>
+  <div class="hintcol">
+    <b>Save</b>
+    <kbd>enter</kbd> save this clip<br>
+    <kbd>ctrl+enter</kbd> done &amp; next clip<br>
+    <kbd>ctrl+s</kbd> save this clip
+  </div>
+</div>
+
+<h3>How to mark a boundary</h3>
+<p>The usual case is <em>accept or nudge one of the two proposals</em>. Move the playhead with
+the waveform (click, or drag the red playhead), then:</p>
+<ul>
+  <li>Hear the word (<kbd>w</kbd>), up to the mark (<kbd>q</kbd>) or after it (<kbd>e</kbd>), and loop
+      (<kbd>l</kbd> / <kbd>shift+l</kbd>) to compare.</li>
+  <li>Put the mark at the playhead with <kbd>f</kbd>, or drag a blue mark in the lower panel.
+      <kbd>&larr;/&rarr;</kbd> step from mark to mark; <kbd>tab</kbd>/<kbd>shift+tab</kbd> jump between words.</li>
+  <li>Nudge for fine adjustments: 5ms, 25ms or 125ms steps. When segmentation lines are shown,
+      nudges within 10ms of a line snap to it.</li>
+</ul>
+
+<h3>Correcting the transcript</h3>
+<p><b>Wrong word?</b> Double-click it to retype, or clear the box to delete it. Use
+<b>+ add word after</b> for one the transcript missed. <b>Corrected</b> words keep the original
+and are outlined amber; <b>added</b> ones are outlined green. Both are preserved in the export.</p>
+
+<h3>Word boundaries &amp; overlaps</h3>
+<p><b>Double-click</b> the <b>start</b> or <b>end</b> label in the info bar (or the buttons) to
+type an exact time &mdash; this may create overlaps. Use <b>untangle words</b> to split overlapping
+words equally, or <b>reset to baseline</b> to restore the original dataset words and timings.</p>
+
+<h3>Using the waveform &amp; spectrogram</h3>
+<p>Drag a blue mark to move it; drag the middle of a word to slide the whole tag; drag any mark to
+make that word current. Click empty space to move the playhead, or drag the red playhead to scrub.
+<b>Wheel zooms</b>, <kbd>shift+wheel</kbd> scrolls, and the bar under the panel pans left and right.
+<b>fit word</b> snaps to the current word, <b>fit all words</b> shows the whole sentence.</p>
+
+<h3>Segmentation lines</h3>
+<p>Tick <b>show speech segmentation lines</b> to overlay automatically detected syllable-like
+boundaries (green). They are only a hint &mdash; adjust the <b>sensitivity threshold</b> (higher =
+fewer lines) and <b>min gap</b> if they do not match the speech.</p>
+
+<h3>Saving &amp; done</h3>
+<p><b>save</b> keeps a checkpoint of your current work; it is always safe mid-clip. Only
+<b>done &amp; next clip</b> marks the clip as finished (you can undo with <b>unmark as done</b>) and
+moves on. The top bar shows how many clips are <b>saved</b> vs <b>done</b>; click the saved count for
+the full list of your clips and their status. Reloading lands you back on the clip you last saved
+without marking done.</p>
 </div>
 
 <script>
@@ -336,7 +445,12 @@ function gate(authed){
 
 async function load(){
   clips=await (await fetch(api('/api/clips'))).json();
-  ci=clips.findIndex(c=>!c.saved); if(ci<0)ci=0;
+  // Land on the clip last worked on but not finished: the most recent one the annotator
+  // saved without marking done. Fall back to the first clip with no marks at all.
+  ci=-1;
+  for(let i=0;i<clips.length;i++) if(clips[i].saved && !clips[i].done) ci=i;
+  if(ci<0) ci=clips.findIndex(c=>!c.saved);
+  if(ci<0) ci=0;
   await loadClip(); tick();
 }
 async function loadClip(){
@@ -1074,8 +1188,13 @@ function render(){
   if(sampleMode){
     $('bar').innerHTML='local sample &nbsp;·&nbsp; word '+(wi+1)+'/'+gold.length;
   }else{
+    const savedN=clips.filter(x=>x.saved).length;
+    const doneN=clips.filter(x=>x.done).length;
     $('bar').innerHTML='clip '+(ci+1)+'/'+clips.length+' &nbsp;·&nbsp; word '+(wi+1)+'/'+gold.length
-      +' &nbsp;·&nbsp; <span id="done">'+clips.filter(x=>x.saved).length+' saved</span>';
+      +' &nbsp;·&nbsp; <a id="savedLink" href="#" title="all clips assigned to you, with their status">'+savedN+' saved</a>'
+      +' &nbsp;·&nbsp; <span id="done">'+doneN+' done</span>';
+    const sl=$('savedLink'); if(sl) sl.onclick=e=>{e.preventDefault();showSaved();};
+    const un=$('unmark'); if(un) un.disabled=!clips[ci].done;
   }
   if(chips.length!==gold.length || !chips.every(c=>c.parentNode)) buildWords();
   gold.forEach((wd,i)=>{const s=chips[i];
@@ -1629,12 +1748,19 @@ $('prevc').onclick=()=>{if(ci>0){ci--;loadClip();}};
 $('saveonly').onclick=save;
 $('save').onclick=saveNext;
 $('skip').onclick=()=>{if(ci<clips.length-1){ci++;loadClip();}};
+$('unmark').onclick=async ()=>{
+  if(sampleMode) return;
+  await fetch(api('/api/unmark'),{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({key:clips[ci].key})});
+  clips[ci].done=false;
+  render();
+};
 
 // ---- experimental: view a local CSV+WAV sample, no server involved --------
 // A drag-in preview: the CSV supplies word boundaries, the WAV supplies audio, and both
 // are decoded entirely client-side. `save`/`saveNext` already no-op under sampleMode, so
 // every edit made while inspecting a sample stays in memory and is never sent anywhere.
-function setClipActionsVisible(v){ $('clipActions').style.display=v?'inline-flex':'none'; }
+function setClipActionsVisible(v){ $('clipNav').style.display=v?'inline-flex':'none'; $('saveRow').style.display=v?'':'none'; }
 function parseSampleCsv(text){
   const lines=text.split(/\r\n|\n|\r/).map(l=>l.trim()).filter(l=>l.length);
   if(!lines.length) throw new Error('file is empty');
@@ -1742,8 +1868,45 @@ async function saveNext(){
   await fetch(api('/api/gold'),{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({index:ci,key:clips[ci].key,words:gold,next:true})});
   clips[ci].saved=gold.map(w=>({...w}));
+  clips[ci].done=true;
   if(ci<clips.length-1){ci++;await loadClip();} else render();
 }
+
+function showSaved(){
+  const box=$('savedItems'); box.innerHTML='';
+  $('savedCount').textContent='('+clips.length+')';
+  if(!clips.length){
+    box.innerHTML='<p>No clips assigned to you yet.</p>';
+  }else{
+    clips.forEach((c,i)=>{
+      const row=document.createElement('div');
+      row.className='savedItem'+(i===ci?' cur':'');
+      row.onclick=()=>{ ci=i; closeSaved(); loadClip(); };
+
+      const idx=document.createElement('span');
+      idx.className='savedIdx'; idx.textContent=(i+1)+'.';
+
+      const text=document.createElement('span');
+      text.className='savedText'; text.textContent=c.text||c.id||'';
+      text.title=c.id||'';
+
+      const saved=document.createElement('span');
+      saved.className='savedBadge'+(c.saved?' on':'');
+      saved.textContent=c.saved?'saved':'not saved';
+
+      const done=document.createElement('span');
+      done.className='savedBadge done'+(c.done?' on':'');
+      done.textContent=c.done?'done':'not done';
+
+      row.append(idx,text,saved,done);
+      box.appendChild(row);
+    });
+  }
+  $('savedlist').classList.add('on');
+}
+function closeSaved(){ $('savedlist').classList.remove('on'); }
+$('savedClose').onclick=closeSaved;
+$('savedlist').onclick=e=>{ if(e.target===$('savedlist')) closeSaved(); };
 
 addEventListener('keydown',async e=>{
   // Never let the transport shortcuts fire while someone is typing: every letter of a
@@ -1751,6 +1914,7 @@ addEventListener('keydown',async e=>{
   // was filled in.
   if(/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)||e.target.isContentEditable)return;
   if($('gate').classList.contains('on')||$('mgate').classList.contains('on'))return;
+  if($('savedlist').classList.contains('on')){ if(e.key==='Escape')closeSaved(); return; }
   if(e.code==='Space'){e.preventDefault();toggle();return;}
   if(e.key==='Escape'){loopKind=null;$('loopWord').classList.remove('on');$('loopMark').classList.remove('on');stop();head=0;seg=null;draw();return;}
   if(e.key==='Tab'){e.preventDefault();(e.shiftKey?goWord(wi-1):goWord(wi+1));return;}

@@ -16,6 +16,6 @@ exec .venv/bin/python -m hebrew_training.align_tag_server \
   ${BUCKET:+--datasets-bucket "$BUCKET"} \
   --datasets-folder data/datasets \
   --dataset "${DATASET:-plenum}" \
-  --out /tmp/marks --multi --split --limit 134 \
+  --out /tmp/marks \
   ${TAG_AUTH:+--auth "$TAG_AUTH"} \
   --host 0.0.0.0 --port "$XHOST_HTTP_PORT"

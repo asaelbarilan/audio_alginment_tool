@@ -106,23 +106,6 @@ def parse_args() -> argparse.Namespace:
         "from the cookie and ?who= is ignored, which is what stops an annotator writing as "
         "someone else. Needs a database for the name bindings.",
     )
-    parser.add_argument(
-        "--split",
-        action="store_true",
-        help="Hand each annotator their own clips, so nobody marks the same sentence "
-        "twice. Without it everyone walks the same order, which is what measures how "
-        "far two humans sit apart on the same boundary.",
-    )
-    parser.add_argument(
-        "--multi",
-        action="store_true",
-        help="Several annotators: ask each for a name and keep their marks in "
-        "separate files, so the same clips can be marked twice and the "
-        "agreement between people measured.",
-    )
-    parser.add_argument(
-        "--limit", type=int, default=100, help="How many clips to serve."
-    )
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8080)))
     return parser.parse_args()
 
@@ -246,7 +229,7 @@ def disagreement(a: dict, b: dict | None) -> float:
     return ends[int(0.9 * (len(ends) - 1))]
 
 
-def build_clips(rows: list[dict], limit: int) -> list[dict]:
+def build_clips(rows: list[dict]) -> list[dict]:
     """Only clips whose first label's words reproduce its transcript exactly.
 
     A clip whose words are a subset of what is spoken is worse than useless here: the
@@ -317,7 +300,7 @@ def build_clips(rows: list[dict], limit: int) -> list[dict]:
     if skipped:
         print(f"skipped {skipped} clips whose words do not reproduce the transcript")
     clips.sort(key=lambda c: c["score"], reverse=True)
-    return clips[:limit]
+    return clips
 
 
 _S3_CACHE: dict[str, bytes] = {}
@@ -613,6 +596,26 @@ class PostgresStore:
                 (self.dataset, key, who),
             )
 
+    def done_keys(self, who: str) -> set:
+        """Clip keys whose claim `who` has finished. Everything they saved but did not
+        finish -- `done=false` -- is the in-progress list the page offers to resume."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT clip_key FROM claims"
+                " WHERE dataset = %s AND annotator = %s AND done = true",
+                (self.dataset, who),
+            ).fetchall()
+        return {r[0] for r in rows}
+
+    def unfinish(self, who: str, key: str) -> None:
+        """Pull a claim back into progress, so the clip is offered again for finishing."""
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE claims SET done = false"
+                " WHERE dataset = %s AND clip_key = %s AND annotator = %s",
+                (self.dataset, key, who),
+            )
+
     def binding(self, sub: str) -> str | None:
         with self.connect() as conn:
             row = conn.execute(
@@ -821,6 +824,22 @@ class FileClaims:
         rows = self.read()
         if key in rows and rows[key]["annotator"] == who:
             rows[key]["done"] = True
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+
+    def done_keys(self, who: str) -> set:
+        rows = self.read()
+        return {
+            k
+            for k, v in rows.items()
+            if v.get("annotator") == who and v.get("done")
+        }
+
+    def unfinish(self, who: str, key: str) -> None:
+        rows = self.read()
+        if key in rows and rows[key]["annotator"] == who:
+            rows[key]["done"] = False
+            self.path.parent.mkdir(parents=True, exist_ok=True)
             self.path.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
 
 
@@ -901,9 +920,7 @@ def index_rows(rows: list[dict], clips: list[dict]) -> dict[int, list]:
 
 
 def gold_path(args, who: str | None) -> Path:
-    """One file per annotator when several are marking, otherwise the single --out file."""
-    if not args.multi:
-        return args.out
+    """One file per annotator: nobody overwrites anyone."""
     args.out.mkdir(parents=True, exist_ok=True)
     return args.out / f"{who or 'anon'}.jsonl"
 
@@ -929,7 +946,7 @@ def load_saved(path: Path, clips: list[dict]) -> dict[int, list]:
     return out
 
 
-def make_handler(args, dataset: Dataset, clips, saved):
+def make_handler(args, dataset: Dataset, clips):
     by_key = {clip_key(c): c for c in clips}
     for c in clips:
         by_key[c["id"]] = c
@@ -1027,7 +1044,7 @@ def make_handler(args, dataset: Dataset, clips, saved):
                     )
             if route == "/api/meta":
                 meta = {
-                    "multi": bool(args.multi),
+                    "multi": True,
                     "clips": len(clips),
                     "dataset": dataset.name,
                 }
@@ -1049,7 +1066,7 @@ def make_handler(args, dataset: Dataset, clips, saved):
                                 )
                             )
                 else:
-                    directory = args.out if args.multi else args.out.parent
+                    directory = args.out
                     for f in sorted(directory.glob("*.jsonl")):
                         for line in f.read_text(encoding="utf-8").splitlines():
                             if line.strip():
@@ -1071,7 +1088,7 @@ def make_handler(args, dataset: Dataset, clips, saved):
                     rows = STORE.progress()
                 else:
                     rows = []
-                    directory = args.out if args.multi else args.out.parent
+                    directory = args.out
                     for f in sorted(directory.glob("*.jsonl")):
                         lines = [
                             ln
@@ -1110,20 +1127,16 @@ def make_handler(args, dataset: Dataset, clips, saved):
                 who = self.who() or "anon"
                 if STORE is not None:
                     mine = STORE.load(who, clips)
-                elif args.multi:
-                    mine = load_saved(gold_path(args, self.who()), clips)
                 else:
-                    mine = saved
-                # With --split each annotator is handed their own clips, so two people never
-                # mark the same sentence. Without it everyone walks the same order, which is
-                # what measures how far two humans sit apart.
-                owned = None
-                if args.split and CLAIMS is not None:
-                    with LOCK:
-                        owned = assign(CLAIMS, who, clips, set(mine))
+                    mine = load_saved(gold_path(args, self.who()), clips)
+                # Split is always on: each annotator is handed their own clips, so two
+                # people never mark the same sentence.
+                with LOCK:
+                    owned = assign(CLAIMS, who, clips, set(mine))
+                done = CLAIMS.done_keys(who)
                 payload = []
                 for index, clip in enumerate(clips):
-                    if owned is not None and index not in owned:
+                    if index not in owned:
                         continue
                     payload.append(
                         {
@@ -1135,6 +1148,7 @@ def make_handler(args, dataset: Dataset, clips, saved):
                             "words": clip["a"],
                             "labels": clip["labels"],
                             "saved": mine.get(index),
+                            "done": clip["id"] in done,
                         }
                     )
                 return self.send(
@@ -1216,12 +1230,24 @@ def make_handler(args, dataset: Dataset, clips, saved):
                 )
             if args.auth and not self.who():
                 return self.send(401, b'{"error":"sign in"}', "application/json")
+            if route == "/api/unmark":
+                # "Unmark as done" pulls the clip's claim back into progress, so it shows
+                # up in the to-finish list again. Marks are untouched.
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length).decode("utf-8"))
+                who = self.who() or "anon"
+                key = body.get("key")
+                if not key:
+                    return self.send(400, b"unknown clip", "text/plain")
+                with LOCK:
+                    CLAIMS.unfinish(who, key)
+                return self.send(200, b'{"ok":true}', "application/json")
             if route != "/api/gold":
                 return self.send(404, b"not found", "text/plain")
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length).decode("utf-8"))
             # The page numbers clips by their position in what it was served, which under
-            # --split is a subset. Resolve by clip key so a save cannot land on someone
+            # split is a subset. Resolve by clip key so a save cannot land on someone
             # else's sentence.
             if body.get("key"):
                 match = [i for i, c in enumerate(clips) if clip_key(c) == body["key"]]
@@ -1243,7 +1269,7 @@ def make_handler(args, dataset: Dataset, clips, saved):
                     mine[index] = body["words"]
                     write_gold(path, clips, mine)
                 # "save" alone is a checkpoint for a clip still being worked on; only
-                # "save & next" (or its shortcuts) should retire the claim, so it is
+                # "done & next" (or its shortcuts) should retire the claim, so it is
                 # never handed to someone else while the annotator is mid-edit.
                 if CLAIMS is not None and body.get("next"):
                     CLAIMS.finish(who, clip_key(clips[index]))
@@ -1286,24 +1312,17 @@ def main() -> None:
         )
     if args.auth:
         print("google sign-in required; ?who= ignored")
-    if args.split:
-        CLAIMS = STORE if STORE is not None else FileClaims(args.out)
-        print(f"split mode: each annotator gets their own clips, {BLOCK} at a time")
+    CLAIMS = STORE if STORE is not None else FileClaims(args.out)
+    print(f"split is always on: each annotator gets their own clips, {BLOCK} at a time")
 
     dataset = resolve_dataset(args)
     meta = dataset.metadata()
     kind = "bucket" if isinstance(dataset, BucketDataset) else "folder"
     print(f"dataset: {meta.get('name', dataset.name)} ({kind})")
 
-    clips = build_clips(dataset.manifest(), args.limit)
+    clips = build_clips(dataset.manifest())
     if not clips:
         raise SystemExit(f"no usable clips in dataset {args.dataset!r}")
-
-    # In --multi each annotator has their own file, loaded per request from their name;
-    # there is no single shared state to resume into here.
-    saved: dict[int, list] = {} if args.multi else load_saved(args.out, clips)
-    if saved:
-        print(f"resuming: {len(saved)} clips already marked")
 
     if isinstance(dataset, LocalDataset):
         missing = [c for c in clips if dataset.audio_exists(c["audio"]) is False]
@@ -1315,7 +1334,7 @@ def main() -> None:
             )
 
     server = ThreadingHTTPServer(
-        (args.host, args.port), make_handler(args, dataset, clips, saved)
+        (args.host, args.port), make_handler(args, dataset, clips)
     )
     words = sum(len(c["a"]) for c in clips)
     print(f"{len(clips)} clips, {words} boundaries to check")
@@ -1324,12 +1343,11 @@ def main() -> None:
     if args.token:
         link += f"?t={args.token}"
     print(f"open {link}   (ctrl-c to stop; progress is saved per clip)")
-    if args.multi:
-        print(f"several annotators: each gets their own file under {args.out}/")
+    print(f"several annotators: each gets their own file under {args.out}/")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print(f"\nstopped. {len(saved)} clips marked -> {args.out}")
+        print(f"\nstopped. marks are under {args.out}/")
 
 
 if __name__ == "__main__":
