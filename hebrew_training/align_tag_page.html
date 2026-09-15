@@ -15,8 +15,8 @@
  button.danger{color:#e88}
  #dl{color:#6aa0ff;font-size:13px;text-decoration:none;align-self:center}
  #dl:hover{text-decoration:underline}
- .wedit{font:inherit;direction:rtl;background:#14161a;color:#e8e8ea;border:1px solid #d8a13a;
-        border-radius:4px;padding:3px 8px;min-width:80px}
+.wedit{font:inherit;background:#14161a;color:#e8e8ea;border:1px solid #d8a13a;
+       border-radius:4px;padding:3px 8px;min-width:80px;unicode-bidi:plaintext}
  #gate{position:fixed;inset:0;background:#14161a;display:none;align-items:center;
        justify-content:center;z-index:50}
  #gate.on{display:flex}
@@ -67,8 +67,8 @@
    .chk{color:#8a8f98;font-size:12px;margin-left:auto;display:flex;align-items:center;gap:6px;cursor:pointer}
   .chk input{accent-color:#3d6fd6;cursor:pointer}
  #clock{color:#c8ccd4;font-variant-numeric:tabular-nums;margin-left:auto;font-size:13px}
- #words{margin:10px 0;direction:rtl;text-align:right;line-height:2.3;font-size:16px}
- .w{padding:3px 9px;margin:0 2px;border-radius:5px;background:#252932;cursor:pointer}
+ #words{margin:10px 0;direction:rtl;display:flex;flex-wrap:wrap;align-items:center;gap:6px 4px;font-size:16px}
+ .w{display:inline-flex;align-items:center;padding:3px 9px;border-radius:5px;background:#252932;cursor:pointer;white-space:nowrap;user-select:none;unicode-bidi:plaintext}
  .w.cur{background:#3d6fd6;color:#fff;font-weight:600}
  .w.ok{background:#24503a;color:#bfe6cf}
  .w.playing{border:2px solid #d8a13a}
@@ -171,6 +171,9 @@
   <div class="sep"></div>
   <button id="addw">+ add word after</button>
   <button id="delw" class="danger">&times; delete word</button>
+  <div class="sep"></div>
+  <button id="untangleBtn" title="Fix overlapping words by splitting shared space equally">untangle words</button>
+  <button id="resetBaselineBtn" title="Reset all words to dataset baseline">reset to baseline</button>
   <label class="chk"><input type="checkbox" id="playMark" checked> play word on mark change</label>
 </div>
 <div class="row" id="snapRow">
@@ -212,6 +215,7 @@
 <br><b>Wrong word?</b> Double-click it to retype, or clear the box to delete it. Use
 <b>+ add word after</b> for one the transcript missed.<br>
 <b>Corrected words</b> are outlined amber, <b>added</b> ones green. Double-click to retype. The original is kept, and the word is outlined in amber.<br>
+<b>Double-click</b> the <b>start</b> or <b>end</b> label in the info bar (or the buttons) to manually enter timings (may create overlaps). Use <b>untangle words</b> to fix overlaps, or <b>reset to baseline</b> to restore original dataset words and timings.<br>
 <b>In the lower panel:</b> drag a blue line to move it, or drag the red playhead to scrub. Click anywhere else to move the
 playhead, and <b>drag empty space to slide the view</b>. <b>Wheel zooms</b>, shift+wheel scrolls, the bar under the panel scrolls left and right, &ldquo;fit word&rdquo; snaps to the current word and &ldquo;fit all words&rdquo; shows the whole sentence. <b>Every word's marks are drawn</b> &mdash; drag any of them and that word becomes current, or <b>drag the middle of a word to slide the whole tag</b>.
 </div>
@@ -230,7 +234,7 @@ function api(path){
   return s?path+'?'+s:path;
 }
 let clips=[],ci=0,wi=0,edge='end',gold=[],touched=new Set();
-let sampleMode=false,sampleCsv=null,sampleWav=null;
+let sampleMode=false,sampleCsv=null,sampleWav=null,sampleBaseline=null;
 let buf=null,lead=0,ctx=null,peaks=null;
 let playing=false,head=0,loopKind=null,rate=1,seg=null;
 const MARGIN=0.35;                    // seconds of context shown either side of the word
@@ -1058,6 +1062,7 @@ function buildWords(){
   const ws=$('words'); ws.innerHTML=''; chips=[]; playingIdx=-1;
   gold.forEach((wd,i)=>{
     const s=document.createElement('span');
+    s.dir='auto';
     s.title='double-click to correct the word';
     s.onclick=()=>{wi=i;fitWord();draw();render();playWord();};
     s.ondblclick=e=>{e.stopPropagation();editWord(i,s);};
@@ -1079,12 +1084,24 @@ function render(){
       +((wd.was!==undefined && wd.was!==wd.word)?' fixed':'')
       +(wd.added?' added':'');});
   const me=gold[wi];
+  if(!me){ $('cmp').innerHTML=''; return; }
   const prevGap=(wi>0)?me.start-gold[wi-1].end:null;
-  const p=['<span class="pill" style="color:#6aa0ff">'+f3(me.start)+' → '+f3(me.end)+'</span>',
-           '<span class="pill">length '+Math.round((me.end-me.start)*1000)+' ms</span>'];
-  if(prevGap!==null)
-    p.push('<span class="pill">gap before '+Math.round(prevGap*1000)+' ms</span>');
+  const p=[
+    '<span class="pill" id="lblStart" title="double-click to manually edit start" style="cursor:pointer;user-select:none"><span style="color:#8a8f98">start:</span> <b style="color:#6aa0ff">'+f3(me.start)+'</b></span>',
+    '<span class="pill" id="lblEnd" title="double-click to manually edit end" style="cursor:pointer;user-select:none"><span style="color:#8a8f98">end:</span> <b style="color:#6aa0ff">'+f3(me.end)+'</b></span>',
+    '<span class="pill"><span style="color:#8a8f98">length:</span> <b>'+Math.round((me.end-me.start)*1000)+' ms</b></span>'
+  ];
+  if(prevGap!==null){
+    if(prevGap<-0.0005){
+      p.push('<span class="pill" style="background:#5c2424;color:#ffaaaa;font-weight:bold" title="Words overlap! Click untangle words to fix">overlap before '+Math.round(-prevGap*1000)+' ms</span>');
+    }else{
+      p.push('<span class="pill">gap before '+Math.round(prevGap*1000)+' ms</span>');
+    }
+  }
   $('cmp').innerHTML=p.join('');
+  const ls=$('lblStart'), le=$('lblEnd');
+  if(ls) ls.ondblclick=e=>{e.stopPropagation();editActiveTime('start',ls);};
+  if(le) le.ondblclick=e=>{e.stopPropagation();editActiveTime('end',le);};
   $('edStart').classList.toggle('on',edge==='start');
   $('edEnd').classList.toggle('on',edge==='end');
 }
@@ -1097,7 +1114,7 @@ function editWord(i,span){
   stop();                       // the click that opened this also started playback
   const before=gold[i].word;
   const inp=document.createElement('input');
-  inp.className='wedit'; inp.value=before; inp.dir='rtl';
+  inp.className='wedit'; inp.value=before; inp.dir='auto';
   span.replaceWith(inp); inp.focus(); inp.select();
   const done=keep=>{
     const v=inp.value.trim();
@@ -1118,6 +1135,57 @@ function editWord(i,span){
   inp.onblur=()=>done(true);
 }
 
+let editingTime=false;
+function editActiveTime(which,el){
+  if(editingTime||!gold||!gold[wi]) return;
+  stop();
+  editingTime=true;
+  const isStart=(which==='start');
+  const val=isStart?gold[wi].start:gold[wi].end;
+  const inp=document.createElement('input');
+  inp.type='text';
+  inp.value=f3(val);
+  inp.className='wedit';
+  inp.style.minWidth='75px';
+  inp.style.width='75px';
+  inp.style.direction='ltr';
+  inp.style.textAlign='center';
+  inp.style.color='#6aa0ff';
+  inp.style.fontWeight='bold';
+  el.replaceWith(inp);
+  inp.focus();
+  inp.select();
+
+  let finished=false;
+  const finish=commit=>{
+    if(finished) return;
+    finished=true;
+    editingTime=false;
+    if(commit){
+      const parsed=parseFloat(inp.value.trim());
+      if(!isNaN(parsed)&&isFinite(parsed)){
+        if(isStart){
+          gold[wi].start=parsed;
+          if(gold[wi].end<parsed) gold[wi].end=parsed;
+        }else{
+          gold[wi].end=parsed;
+          if(gold[wi].start>parsed) gold[wi].start=parsed;
+        }
+        touched.add(wi);
+        save();
+      }
+    }
+    render(); draw();
+  };
+
+  inp.onkeydown=e=>{
+    e.stopPropagation();
+    if(e.key==='Enter'){e.preventDefault();finish(true);}
+    if(e.key==='Escape'){e.preventDefault();finish(false);}
+  };
+  inp.onblur=()=>finish(true);
+}
+
 // `touched` is a set of positions, so inserting or removing a word renumbers every entry
 // after it. Left unshifted, the green "done" marks would silently slide onto the wrong
 // words.
@@ -1131,21 +1199,144 @@ function shiftTouched(set,at,by){
   return out;
 }
 
-// A word the ASR missed entirely. It goes in the gap after the current word, because that
-// gap is where an unheard word actually sits; if there is no gap, carve a short span out of
-// the following silence and let the annotator drag it.
+// A word the ASR missed entirely. Added after the currently selected word.
 function addWord(){
-  const cur=gold[wi], next=gold[wi+1];
-  const MIN=0.15;              // a 20ms box is invisible and undraggable
-  const lo=cur.end;
-  const ceiling=next?next.end-0.01:total();
-  let a=lo, b=Math.min(lo+0.25,ceiling);
-  if(b-a<MIN) b=Math.min(a+MIN,total());
-  if(b-a<MIN) a=Math.max(tmin(),b-MIN);   // at the very end of the clip, grow backwards
-  gold.splice(wi+1,0,{word:'?',start:a,end:b,added:true});
-  touched=shiftTouched(touched,wi+1,1); touched.add(wi+1);
-  wi=wi+1; buildWords(); render(); draw();
+  if(!gold||!gold.length) return;
+  const MIN_LEN=0.020;    // 20ms minimal word length
+  const TARGET_LEN=0.500; // 500ms target length if space permits
+  const maxAudio=total();
+
+  const cur=gold[wi];
+  const next=(wi+1<gold.length)?gold[wi+1]:null;
+  const newStart=cur.end;
+
+  let space=next?(next.start-newStart):(maxAudio-newStart);
+  let newEnd;
+  let pushed=false;
+
+  if(next){
+    if(space>=TARGET_LEN){
+      newEnd=newStart+TARGET_LEN;
+    }else if(space>=MIN_LEN){
+      newEnd=next.start;
+    }else{
+      newEnd=newStart+MIN_LEN;
+      next.start=newEnd;
+      pushed=true;
+    }
+  }else{
+    newEnd=Math.min(newStart+TARGET_LEN,maxAudio);
+  }
+
+  if(newStart>maxAudio) newStart=maxAudio;
+  if(newEnd>maxAudio) newEnd=maxAudio;
+  if(newEnd<newStart) newEnd=newStart;
+
+  const newWord={word:'?',start:newStart,end:newEnd,added:true};
+  const insertIndex=wi+1;
+  gold.splice(insertIndex,0,newWord);
+  touched=shiftTouched(touched,insertIndex,1);
+  touched.add(insertIndex);
+
+  if(pushed){
+    for(let k=insertIndex+1;k<gold.length;k++){
+      if(gold[k].start>maxAudio) gold[k].start=maxAudio;
+      if(gold[k].end-gold[k].start<MIN_LEN){
+        gold[k].end=gold[k].start+MIN_LEN;
+      }
+      if(gold[k].end>maxAudio) gold[k].end=maxAudio;
+
+      touched.add(k);
+
+      if(k<gold.length-1){
+        if(gold[k+1].start<gold[k].end){
+          gold[k+1].start=gold[k].end;
+        }else{
+          break;
+        }
+      }
+    }
+  }
+
+  wi=insertIndex;
+  fitWord();
+  buildWords();
+  render();
+  draw();
+  save();
   editWord(wi,chips[wi]);        // straight into typing; a word called "?" helps nobody
+}
+
+function untangleWords(){
+  if(!gold||gold.length<=1) return;
+  if(!confirm("Untangle words will change any overlapping word timings regardless of original values. Continue?")) return;
+
+  // Words are kept in text order (as they appear in the labels / gold array).
+  // Identify overlapping or out-of-order groups along the text order sequence.
+  const EPS=1e-5;
+  const groups=gold.map(w=>({
+    words:[w],
+    start:w.start,
+    end:w.end
+  }));
+
+  const merged=[];
+  for(const g of groups){
+    let cur=g;
+    while(merged.length>0){
+      const prev=merged[merged.length-1];
+      if(cur.start<prev.end-EPS){
+        merged.pop();
+        cur={
+          words:prev.words.concat(cur.words),
+          start:Math.min(prev.start,cur.start),
+          end:Math.max(prev.end,cur.end)
+        };
+      }else{
+        break;
+      }
+    }
+    merged.push(cur);
+  }
+
+  // Untangle groups: each overlapping group splits its shared space into equal parts among its words in text order
+  let changed=false;
+  for(const g of merged){
+    if(g.words.length>1){
+      changed=true;
+      const span=Math.max(0,g.end-g.start);
+      const step=span/g.words.length;
+      for(let k=0;k<g.words.length;k++){
+        g.words[k].start=g.start+k*step;
+        g.words[k].end=(k===g.words.length-1)?g.end:(g.start+(k+1)*step);
+      }
+    }
+  }
+
+  if(changed){
+    gold.forEach((_,i)=>touched.add(i));
+    save();
+  }
+
+  buildWords();
+  render();
+  draw();
+}
+
+function resetToBaseline(){
+  const base=sampleMode?sampleBaseline:(clips[ci]&&clips[ci].words);
+  if(!base||!base.length) return;
+  if(!confirm("Reset all words to dataset baseline? This will restore original words and timings.")) return;
+  stop();
+  gold=base.map(w=>({word:w.word,start:w.start,end:w.end}));
+  touched=new Set();
+  wi=0;
+  edge='end';
+  fitWord();
+  buildWords();
+  render();
+  draw();
+  save();
 }
 
 // A word the ASR invented. The clip keeps its original `transcript`, so a word missing from
@@ -1366,6 +1557,8 @@ $('rate').onchange=e=>{
 };
 $('edStart').onclick=()=>{edge='start';draw();render();};
 $('edEnd').onclick=()=>{edge='end';draw();render();};
+$('edStart').ondblclick=e=>{e.stopPropagation();const ls=$('lblStart');if(ls)editActiveTime('start',ls);};
+$('edEnd').ondblclick=e=>{e.stopPropagation();const le=$('lblEnd');if(le)editActiveTime('end',le);};
 $('playMark').checked=localStorage.getItem('tagPlayMark')!=='0';
 playOnMark=$('playMark').checked;
 $('playMark').onchange=e=>{playOnMark=e.target.checked;
@@ -1429,6 +1622,8 @@ $('fit').onclick=()=>{fitWord();draw();};
 $('fitall').onclick=()=>{view=[Math.max(tmin(),gold[0].start-0.2),
   Math.min(total(),gold[gold.length-1].end+0.2)];draw();};
 $('addw').onclick=addWord; $('delw').onclick=delWord;
+$('untangleBtn').onclick=untangleWords;
+$('resetBaselineBtn').onclick=resetToBaseline;
 $('prevw').onclick=()=>goWord(wi-1); $('nextw').onclick=()=>goWord(wi+1);
 $('prevc').onclick=()=>{if(ci>0){ci--;loadClip();}};
 $('saveonly').onclick=save;
@@ -1472,7 +1667,8 @@ async function tryLoadSample(){
     const decoded=await ctx.decodeAudioData(sampleWav.buf.slice(0));
     stop();
     sampleMode=true;
-    gold=words; touched=new Set();
+    sampleBaseline=words.map(w=>({...w}));
+    gold=words.map(w=>({...w})); touched=new Set();
     wi=0; edge='end'; head=0; lead=0;              // local wav has no server-side pre-roll
     buf=decoded; specCanvas=buildMelSpec(buf); snapPoints=specCanvas?(specCanvas.snapPoints||[]):[];
     peaks=null; view=null; stretchCache.clear();
@@ -1520,7 +1716,7 @@ $('uploadSampleBtn').onclick=()=>{
 };
 $('removeSampleBtn').onclick=async ()=>{
   stop();
-  sampleMode=false; sampleCsv=null; sampleWav=null;
+  sampleMode=false; sampleCsv=null; sampleWav=null; sampleBaseline=null;
   resetDropzone($('csvDrop'),CSV_LABEL); resetDropzone($('wavDrop'),WAV_LABEL);
   $('sampleErr').textContent='';
   $('sampleUpload').style.display='none';
